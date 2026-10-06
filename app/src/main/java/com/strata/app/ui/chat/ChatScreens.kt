@@ -35,6 +35,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -190,8 +191,10 @@ fun ConversationScreen(
     onDismissError: () -> Unit,
     onOpenSetup: () -> Unit,
     onBack: () -> Unit,
+    onStop: () -> Unit,
     modifier: Modifier = Modifier,
     initialDraft: String = "",
+    expandTraces: Boolean = false,
 ) {
     val listState = rememberLazyListState()
     val count = ui.items.size + (if (ui.run.busy) 1 else 0)
@@ -218,6 +221,7 @@ fun ConversationScreen(
                 busy = ui.run.busy,
                 enabled = ui.hasApiKey,
                 onSend = onSend,
+                onStop = onStop,
                 onAttach = onAttach,
                 onRemoveFile = onRemoveFile,
                 initialDraft = initialDraft,
@@ -235,11 +239,11 @@ fun ConversationScreen(
             items(ui.items, key = { it.key }) { item ->
                 when (item) {
                     is ChatItem.User -> UserBubble(item)
-                    is ChatItem.Activity -> ActivityLine(item.steps, running = false)
+                    is ChatItem.Activity -> ActivityCard(item, initiallyExpanded = expandTraces)
                     is ChatItem.Assistant -> AssistantBlock(item, onApply, onDiscard, onUndo)
                 }
             }
-            if (ui.run.busy) item(key = "running") { RunningRow(ui.run.progress.orEmpty()) }
+            if (ui.run.busy) item(key = "running") { RunningRow(ui.run) }
             ui.run.error?.let { error -> item(key = "error") { ErrorCard(error, onDismissError) } }
         }
     }
@@ -298,34 +302,6 @@ private fun FileChip(name: String, detail: String?, onRemove: (() -> Unit)? = nu
                 Icon(Icons.Rounded.Close, "Remove $name", tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
             }
         }
-    }
-}
-
-@Composable
-private fun ActivityLine(steps: List<String>, running: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 2.dp)) {
-        Box(
-            Modifier.size(20.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiaryContainer),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(14.dp))
-        }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            steps.joinToString("  ·  "),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-private fun RunningRow(progress: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        LoadingIndicator(Modifier.size(40.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(progress, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -466,6 +442,7 @@ private fun Composer(
     busy: Boolean,
     enabled: Boolean,
     onSend: (String) -> Unit,
+    onStop: () -> Unit,
     onAttach: () -> Unit,
     onRemoveFile: (Int) -> Unit,
     initialDraft: String,
@@ -509,11 +486,23 @@ private fun Composer(
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
-                FilledIconButton(
-                    onClick = { onSend(text.trim()); text = "" },
-                    enabled = canSend,
-                    modifier = Modifier.size(52.dp),
-                ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                if (busy) {
+                    // While a turn runs the send button becomes Stop, which cancels the request mid-flight.
+                    FilledIconButton(
+                        onClick = onStop,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                        modifier = Modifier.size(52.dp),
+                    ) { Icon(Icons.Rounded.Stop, "Stop") }
+                } else {
+                    FilledIconButton(
+                        onClick = { onSend(text.trim()); text = "" },
+                        enabled = canSend,
+                        modifier = Modifier.size(52.dp),
+                    ) { Icon(Icons.AutoMirrored.Rounded.Send, "Send") }
+                }
             }
         }
     }

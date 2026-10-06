@@ -4,7 +4,10 @@ import android.net.Uri
 import com.strata.app.data.db.ProposalStatus
 import com.strata.app.data.repo.ChatRepository
 import com.strata.app.data.repo.LedgerRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,8 +15,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
 
-data class RunState(val progress: String? = null, val error: String? = null) {
+data class RunState(
+    val progress: String? = null,
+    val error: String? = null,
+    val round: Int = 0,
+    /** When the current step began, for the live timer. */
+    val since: Long = 0,
+    /** When the whole turn began. */
+    val startedAt: Long = 0,
+) {
     val busy: Boolean get() = progress != null
 }
 
@@ -33,18 +45,35 @@ class ChatController(
     private val _runs = MutableStateFlow<Map<Long, RunState>>(emptyMap())
     val runs: StateFlow<Map<Long, RunState>> = _runs
 
+    private val jobs = ConcurrentHashMap<Long, Job>()
+
     fun send(chatId: Long, text: String, uris: List<Uri>) {
         if (_runs.value[chatId]?.busy == true) return
-        set(chatId, RunState(progress = if (uris.isEmpty()) "Thinking" else "Reading your files"))
-        scope.launch {
+        val startedAt = System.currentTimeMillis()
+        set(chatId, RunState(progress = if (uris.isEmpty()) "Starting" else "Reading your files", since = startedAt, startedAt = startedAt))
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val prepared = uris.map { documents().prepare(it) }
-                agent.send(chatId, text, prepared) { step -> set(chatId, RunState(progress = step)) }
+                agent.send(chatId, text, prepared) { p ->
+                    set(chatId, RunState(progress = p.label, round = p.round, since = p.since, startedAt = startedAt))
+                }
                 set(chatId, RunState())
+            } catch (e: CancellationException) {
+                set(chatId, RunState())
+                throw e
             } catch (e: Exception) {
                 set(chatId, RunState(error = e.message ?: "Something went wrong."))
+            } finally {
+                jobs.remove(chatId, coroutineContext[Job])
             }
         }
+        jobs[chatId] = job
+        job.start()
+    }
+
+    /** Cancels the running turn, including an in-flight request to the model. */
+    fun stop(chatId: Long) {
+        jobs[chatId]?.cancel()
     }
 
     fun dismissError(chatId: Long) = set(chatId, RunState())

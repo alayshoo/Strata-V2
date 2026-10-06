@@ -40,6 +40,8 @@ class AppContainer(private val context: Context) {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(240, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
+        // Keep-alive bytes can defeat the read timeout; this caps any single request.
+        .callTimeout(5, TimeUnit.MINUTES)
         .build()
 
     private val _session = MutableStateFlow<Session?>(null)

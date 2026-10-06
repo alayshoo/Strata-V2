@@ -11,7 +11,11 @@ import com.strata.app.data.db.SourceEntity
 import com.strata.app.data.db.SpendingCategoryEntity
 import com.strata.app.data.db.TxKind
 import com.strata.app.domain.MoneyFormat
+import com.strata.app.ai.RoundTrace
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -41,14 +45,31 @@ sealed interface ChatItem {
         override val key = "u$id"
     }
 
-    data class Activity(val id: Long, val steps: List<String>) : ChatItem {
+    /** Everything the model did between a user message and its answer. */
+    data class Activity(val id: Long, val steps: List<String>, val rounds: List<TraceRound> = emptyList()) : ChatItem {
         override val key = "a$id"
+        val totalMs: Long get() = rounds.sumOf { it.durationMs ?: 0L }
+        val callCount: Int get() = rounds.sumOf { it.calls.size }
+        val errorCount: Int get() = rounds.sumOf { r -> r.calls.count { it.isError } }
     }
 
     data class Assistant(val id: Long, val text: String, val proposal: ProposalUi?) : ChatItem {
         override val key = "m$id"
     }
 }
+
+data class TraceCall(val label: String, val name: String, val arguments: String, val result: String?, val isError: Boolean)
+
+data class TraceRound(
+    val round: Int?,
+    val durationMs: Long?,
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val reasoning: String?,
+    /** Text the model wrote alongside its tool calls. */
+    val note: String?,
+    val calls: List<TraceCall>,
+)
 
 data class Lookup(
     val products: List<ProductEntity>,
@@ -76,42 +97,66 @@ private val stepNames = mapOf(
     "clear_staged_changes" to "Started the draft over",
 )
 
-/** Turns stored messages into what the conversation shows; tool traffic collapses into activity lines. */
+private fun pretty(raw: String): String = runCatching {
+    prettyJson.encodeToString(JsonElement.serializer(), json.parseToJsonElement(raw))
+}.getOrDefault(raw)
+
+private val prettyJson = Json { prettyPrint = true; prettyPrintIndent = "  " }
+
+private fun trace(m: MessageEntity): RoundTrace? =
+    m.traceJson?.let { runCatching { json.decodeFromString(RoundTrace.serializer(), it) }.getOrNull() }
+
+/**
+ * Turns stored messages into what the conversation shows. Tool traffic collapses into one
+ * activity item per turn, which can be expanded into a round-by-round trace.
+ */
 fun buildChatItems(messages: List<MessageEntity>, attachments: List<AttachmentEntity>, lookup: Lookup): List<ChatItem> {
     val byMessage = attachments.groupBy { it.messageId }
+    val results = messages.filter { it.role == Role.TOOL && it.toolCallId != null }.associateBy { it.toolCallId }
     val items = mutableListOf<ChatItem>()
-    var pendingSteps = mutableListOf<String>()
+    var steps = mutableListOf<String>()
+    var rounds = mutableListOf<TraceRound>()
     var activityId = 0L
-    fun flushSteps() {
-        if (pendingSteps.isNotEmpty()) {
-            items += ChatItem.Activity(activityId, pendingSteps.distinct())
-            pendingSteps = mutableListOf()
+    fun flush() {
+        if (steps.isNotEmpty() || rounds.isNotEmpty()) {
+            items += ChatItem.Activity(activityId, steps.distinct(), rounds)
+            steps = mutableListOf()
+            rounds = mutableListOf()
         }
     }
     for (m in messages) {
         when (m.role) {
             Role.USER -> {
-                flushSteps()
+                flush()
                 items += ChatItem.User(m.id, m.content, byMessage[m.id].orEmpty().map { AttachmentChip(it.fileName, it.pageCount) })
             }
             Role.TOOL -> Unit
             Role.ASSISTANT -> {
+                val t = trace(m)
+                if (steps.isEmpty() && rounds.isEmpty()) activityId = m.id
                 if (m.toolCallsJson != null) {
-                    if (pendingSteps.isEmpty()) activityId = m.id
-                    runCatching {
-                        json.parseToJsonElement(m.toolCallsJson).jsonArray.forEach { call ->
-                            val name = call.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content
-                            pendingSteps += stepNames[name] ?: name
+                    val calls = runCatching {
+                        json.parseToJsonElement(m.toolCallsJson).jsonArray.map { element ->
+                            val call = element.jsonObject
+                            val function = call["function"]!!.jsonObject
+                            val name = function["name"]!!.jsonPrimitive.content
+                            val args = function["arguments"]?.let { a -> (a as? JsonPrimitive)?.contentOrNull ?: a.toString() } ?: "{}"
+                            val result = results[call["id"]?.jsonPrimitive?.contentOrNull]?.content
+                            val label = stepNames[name] ?: name
+                            steps += label
+                            TraceCall(label, name, pretty(args), result?.let(::pretty), result?.trimStart()?.startsWith("{\"error\"") == true)
                         }
-                    }
+                    }.getOrDefault(emptyList())
+                    rounds += TraceRound(t?.round, t?.durationMs, t?.promptTokens, t?.completionTokens, t?.reasoning, m.content.ifBlank { null }, calls)
                 } else {
-                    flushSteps()
+                    if (t != null) rounds += TraceRound(t.round, t.durationMs, t.promptTokens, t.completionTokens, t.reasoning, null, emptyList())
+                    flush()
                     items += ChatItem.Assistant(m.id, m.content, m.proposalJson?.let { proposalUi(m, it, lookup) })
                 }
             }
         }
     }
-    flushSteps()
+    flush()
     return items
 }
 

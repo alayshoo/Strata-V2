@@ -187,6 +187,8 @@ data class MessageEntity(
     val proposalStatus: ProposalStatus? = null,
     val importId: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /** How the model call that produced this message went, serialized RoundTrace. */
+    val traceJson: String? = null,
 )
 
 @Entity(

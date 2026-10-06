@@ -12,7 +12,14 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Response
+import java.io.IOException
+import java.io.InterruptedIOException
+import kotlin.coroutines.resumeWithException
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -24,6 +31,11 @@ data class AssistantReply(
     val toolCalls: List<ToolCall>,
     /** The tool_calls array exactly as returned, to replay in history. */
     val rawToolCalls: JsonArray?,
+    /** Thinking text, for models that expose it. */
+    val reasoning: String? = null,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val finishReason: String? = null,
 )
 
 data class ModelInfo(val id: String, val name: String, val promptPricePerMillion: Double?, val contextLength: Int?)
@@ -42,7 +54,7 @@ class OpenRouterClient(private val http: OkHttpClient) {
         messages: JsonArray,
         tools: JsonArray,
         privateProvidersOnly: Boolean,
-    ): AssistantReply = withContext(Dispatchers.IO) {
+    ): AssistantReply {
         val body = buildJsonObject {
             put("model", model)
             put("messages", messages)
@@ -51,8 +63,10 @@ class OpenRouterClient(private val http: OkHttpClient) {
             if (privateProvidersOnly) put("provider", buildJsonObject { put("data_collection", "deny") })
         }
         val root = post("chat/completions", apiKey, body)
-        val message = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
+        val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+        val message = choice?.get("message")?.jsonObject
             ?: throw OpenRouterException("The model returned no message.")
+        val usage = root["usage"] as? JsonObject
         val rawCalls = (message["tool_calls"] as? JsonArray)?.takeIf { it.isNotEmpty() }
         val calls = rawCalls.orEmpty().map { element ->
             val call = element.jsonObject
@@ -68,10 +82,14 @@ class OpenRouterClient(private val http: OkHttpClient) {
                 },
             )
         }
-        AssistantReply(
+        return AssistantReply(
             content = (message["content"] as? JsonPrimitive)?.contentOrNull,
             toolCalls = calls,
             rawToolCalls = rawCalls,
+            reasoning = (message["reasoning"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
+            promptTokens = (usage?.get("prompt_tokens") as? JsonPrimitive)?.contentOrNull?.toIntOrNull(),
+            completionTokens = (usage?.get("completion_tokens") as? JsonPrimitive)?.contentOrNull?.toIntOrNull(),
+            finishReason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull,
         )
     }
 
@@ -108,15 +126,17 @@ class OpenRouterClient(private val http: OkHttpClient) {
         }
     }
 
-    private fun post(path: String, apiKey: String, body: JsonObject): JsonObject {
+    /** Suspends on the request; cancelling the coroutine cancels the HTTP call immediately. */
+    private suspend fun post(path: String, apiKey: String, body: JsonObject): JsonObject {
         val request = Request.Builder()
             .url("$BASE/$path")
             .header("Authorization", "Bearer $apiKey")
             .header("X-Title", "Strata")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(request).execute().use { response ->
-            val text = response.body.string()
+        val call = http.newCall(request)
+        call.await().use { response ->
+            val text = withContext(Dispatchers.IO) { response.body.string() }
             if (!response.isSuccessful) {
                 throw OpenRouterException(errorMessage(text) ?: "OpenRouter returned ${response.code}.")
             }
@@ -124,6 +144,21 @@ class OpenRouterClient(private val http: OkHttpClient) {
             root["error"]?.let { throw OpenRouterException(errorMessage(text) ?: it.toString()) }
             return root
         }
+    }
+
+    private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+        cont.invokeOnCancellation { cancel() }
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(
+                    if (e is InterruptedIOException && !call.isCanceled()) OpenRouterException("The model took longer than 5 minutes to answer.") else e
+                )
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                cont.resume(response) { _, _, _ -> response.close() }
+            }
+        })
     }
 
     private fun errorMessage(text: String): String? = runCatching {

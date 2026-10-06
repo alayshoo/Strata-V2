@@ -188,6 +188,7 @@ private fun ConversationRoute(session: Session, chatId: Long, onBack: () -> Unit
         onDismissError = vm::dismissError,
         onOpenSetup = onOpenSetup,
         onBack = onBack,
+        onStop = vm::stop,
     )
 }
 

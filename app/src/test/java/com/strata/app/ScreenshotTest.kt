@@ -15,6 +15,8 @@ import com.strata.app.ai.ChangeSet
 import com.strata.app.ai.NewSnapshot
 import com.strata.app.ai.NewTransaction
 import com.strata.app.ai.ProductPointer
+import com.strata.app.ai.RoundTrace
+import com.strata.app.ai.RunState
 import com.strata.app.data.db.AttachmentEntity
 import com.strata.app.data.db.ChatEntity
 import com.strata.app.data.db.MessageEntity
@@ -136,11 +138,23 @@ class ScreenshotTest(private val dark: Boolean) {
     }
 
     @Test fun conversation() = shoot("06-conversation", tall = 1400) {
-        ConversationScreen(conversationUi(), emptyList(), {}, {}, {}, {}, {}, {}, {}, {}, {})
+        ConversationScreen(conversationUi(), emptyList(), {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+
+    @Test fun conversationTrace() = shoot("15-conversation-trace", tall = 2400) {
+        ConversationScreen(conversationUi(), emptyList(), {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, expandTraces = true)
+    }
+
+    @Test fun conversationRunning() = shoot("16-conversation-running") {
+        val now = System.currentTimeMillis()
+        val running = conversationUi(running = true).copy(
+            run = RunState(progress = "Waiting for the model", round = 4, since = now - 102_000, startedAt = now - 161_000),
+        )
+        ConversationScreen(running, emptyList(), {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
     }
 
     @Test fun conversationApplied() = shoot("07-conversation-applied") {
-        ConversationScreen(conversationUi(ProposalStatus.APPLIED), listOf("revolut_2026_09.csv"), {}, {}, {}, {}, {}, {}, {}, {}, {}, initialDraft = "And this one is my Revolut export")
+        ConversationScreen(conversationUi(ProposalStatus.APPLIED), listOf("revolut_2026_09.csv"), {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, initialDraft = "And this one is my Revolut export")
     }
 
     @Test fun holdings() = shoot("08-data-holdings", tall = 1300) {
@@ -190,7 +204,13 @@ class ScreenshotTest(private val dark: Boolean) {
         }
     }
 
-    private fun conversationUi(status: ProposalStatus = ProposalStatus.PENDING): ConversationUi {
+    private fun trace(round: Int, ms: Long, inTokens: Int, outTokens: Int, reasoning: String?) =
+        Json.encodeToString(RoundTrace.serializer(), RoundTrace(round, "z-ai/glm-5.3-flash", ms, inTokens, outTokens, reasoning))
+
+    private fun callsWith(name: String, escapedArgs: String) =
+        """[{"id":"b0","type":"function","function":{"name":"$name","arguments":"$escapedArgs"}}]"""
+
+    private fun conversationUi(status: ProposalStatus = ProposalStatus.PENDING, running: Boolean = false): ConversationUi {
         val json = Json
         val changes = ChangeSet(
             snapshots = listOf(
@@ -207,14 +227,19 @@ class ScreenshotTest(private val dark: Boolean) {
             ),
             fileNames = listOf("extrato_setembro_2026.pdf"),
         )
-        val calls = { names: List<String> ->
-            names.mapIndexed { i, n -> """{"id":"c$i","type":"function","function":{"name":"$n","arguments":"{}"}}""" }.joinToString(",", "[", "]")
+        val calls = { prefix: String, names: List<String> ->
+            names.mapIndexed { i, n -> """{"id":"$prefix$i","type":"function","function":{"name":"$n","arguments":"{}"}}""" }.joinToString(",", "[", "]")
         }
         val messages = listOf(
             MessageEntity(1, 3, Role.USER, "September statement from Millennium. The Visa card is in there too."),
-            MessageEntity(2, 3, Role.ASSISTANT, "", toolCallsJson = calls(listOf("list_sources", "list_products", "list_spending_categories"))),
-            MessageEntity(3, 3, Role.TOOL, "[]", toolCallId = "c0"),
-            MessageEntity(4, 3, Role.ASSISTANT, "", toolCallsJson = calls(listOf("get_transactions", "find_transfer_candidates", "stage_snapshots", "stage_transactions"))),
+            MessageEntity(2, 3, Role.ASSISTANT, "", toolCallsJson = calls("a", listOf("list_sources", "list_products")), traceJson = trace(1, 8_400, 6_120, 96, "The user shared a Millennium statement. I need the source id and the products to map the account and the card.")),
+            MessageEntity(3, 3, Role.TOOL, """[{"id":1,"name":"Millennium BCP","type":"bank"}]""", toolCallId = "a0"),
+            MessageEntity(31, 3, Role.TOOL, """[{"id":1,"name":"Current account","currency":"EUR"},{"id":10,"name":"Visa Gold","currency":"EUR"}]""", toolCallId = "a1"),
+            MessageEntity(4, 3, Role.ASSISTANT, "Mapping the card payments now.", toolCallsJson = callsWith("stage_transactions", """{\"items\":[{\"product_id\":1,\"date\":\"2026-09-21\",\"amount\":\"-63,18\",\"kind\":\"expense\"}]}"""), traceJson = trace(2, 21_900, 14_880, 2_410, null)),
+            MessageEntity(41, 3, Role.TOOL, """{"error":"items[0].amount: use '.' as the decimal separator and no thousands separators, got '-63,18'"}""", toolCallId = "b0"),
+            MessageEntity(43, 3, Role.TOOL, """{"staged":2}""", toolCallId = "c0"),
+            MessageEntity(44, 3, Role.TOOL, """{"staged":32}""", toolCallId = "c1"),
+            MessageEntity(42, 3, Role.ASSISTANT, "", toolCallsJson = calls("c", listOf("stage_snapshots", "stage_transactions")), traceJson = trace(3, 17_300, 17_420, 2_380, null)),
             MessageEntity(
                 5, 3, Role.ASSISTANT,
                 "I read the statement for 1 to 30 September and staged it for review.\n\n" +
@@ -224,8 +249,9 @@ class ScreenshotTest(private val dark: Boolean) {
                 proposalJson = json.encodeToString(ChangeSet.serializer(), changes),
                 proposalStatus = status,
                 importId = if (status == ProposalStatus.APPLIED) 3 else null,
+                traceJson = trace(4, 6_200, 19_800, 310, null),
             ),
-        )
+        ).let { if (running) it.dropLast(1) else it }
         val attachments = listOf(AttachmentEntity(1, 1, "extrato_setembro_2026.pdf", "application/pdf", "", 3))
         val items = buildChatItems(messages, attachments, Lookup(SampleData.products, SampleData.sources, SampleData.categories))
         return ConversationUi("September statement from Millennium", items, model = "anthropic/claude-sonnet-5.5")

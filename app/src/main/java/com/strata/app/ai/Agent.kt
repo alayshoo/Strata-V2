@@ -7,6 +7,10 @@ import com.strata.app.data.db.Role
 import com.strata.app.data.db.StrataDatabase
 import com.strata.app.data.repo.SettingsRepository
 import com.strata.app.domain.FxTable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -18,6 +22,21 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.time.LocalDate
+
+/** What the UI shows while a turn runs. */
+data class RunProgress(val label: String, val round: Int, val since: Long)
+
+/** One request to the model: how long it took, what it cost, and its reasoning if exposed. */
+@Serializable
+data class RoundTrace(
+    val round: Int,
+    val model: String,
+    val durationMs: Long,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val reasoning: String? = null,
+    val finishReason: String? = null,
+)
 
 /**
  * Runs one user turn: sends the conversation to the model, executes tool calls until it answers,
@@ -36,7 +55,7 @@ class Agent(
         chatId: Long,
         text: String,
         attachments: List<PreparedAttachment>,
-        onProgress: (String) -> Unit,
+        onProgress: (RunProgress) -> Unit,
     ) {
         val apiKey = settings.apiKey() ?: throw OpenRouterException("Add your OpenRouter API key in Setup first.")
         val model = settings.model()
@@ -56,28 +75,54 @@ class Agent(
         val history = buildHistory(chatId, currentImages = userMessageId to attachments.flatMap { it.images })
         val messages = history.toMutableList()
 
-        repeat(MAX_ROUNDS) {
-            onProgress("Thinking")
-            val reply = client.complete(apiKey, model, JsonArray(messages), ToolSpecs.all, privateOnly)
-            if (reply.toolCalls.isEmpty()) {
-                finish(chatId, reply.content.orEmpty(), executor.staged)
-                return
+        var round = 0
+        try {
+            while (round < MAX_ROUNDS) {
+                round++
+                val startedAt = System.currentTimeMillis()
+                onProgress(RunProgress("Waiting for the model", round, startedAt))
+                val reply = client.complete(apiKey, model, JsonArray(messages), ToolSpecs.all, privateOnly)
+                val trace = RoundTrace(
+                    round = round,
+                    model = model,
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    promptTokens = reply.promptTokens,
+                    completionTokens = reply.completionTokens,
+                    reasoning = reply.reasoning,
+                    finishReason = reply.finishReason,
+                )
+                if (reply.toolCalls.isEmpty()) {
+                    finish(chatId, reply.content.orEmpty(), executor.staged, trace)
+                    return
+                }
+                // Tool calls and their results are written together so a stop never leaves
+                // a call without a result, which would make the history invalid for the next turn.
+                withContext(NonCancellable) {
+                    chatDao.insertMessage(
+                        MessageEntity(
+                            chatId = chatId, role = Role.ASSISTANT, content = reply.content.orEmpty(),
+                            toolCallsJson = reply.rawToolCalls.toString(), traceJson = json.encodeToString(RoundTrace.serializer(), trace),
+                        )
+                    )
+                    messages += assistantJson(reply.content, reply.rawToolCalls)
+                    for (call in reply.toolCalls) {
+                        onProgress(RunProgress(executor.describe(call.name), round, System.currentTimeMillis()))
+                        val result = executor.execute(call.name, call.arguments)
+                        chatDao.insertMessage(MessageEntity(chatId = chatId, role = Role.TOOL, content = result, toolCallId = call.id))
+                        messages += buildJsonObject { put("role", "tool"); put("tool_call_id", call.id); put("content", result) }
+                    }
+                }
             }
-            chatDao.insertMessage(
-                MessageEntity(chatId = chatId, role = Role.ASSISTANT, content = reply.content.orEmpty(), toolCallsJson = reply.rawToolCalls.toString())
-            )
-            messages += assistantJson(reply.content, reply.rawToolCalls)
-            for (call in reply.toolCalls) {
-                onProgress(executor.describe(call.name))
-                val result = executor.execute(call.name, call.arguments)
-                chatDao.insertMessage(MessageEntity(chatId = chatId, role = Role.TOOL, content = result, toolCallId = call.id))
-                messages += buildJsonObject { put("role", "tool"); put("tool_call_id", call.id); put("content", result) }
+            finish(chatId, "I stopped after $MAX_ROUNDS rounds without finishing. Here is what I staged so far.", executor.staged, null)
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) {
+                finish(chatId, STOPPED_MESSAGE + if (executor.staged.isEmpty) "" else " What was staged before that is below.", executor.staged, null)
             }
+            throw e
         }
-        finish(chatId, "I stopped after too many steps. Here is what I staged so far.", executor.staged)
     }
 
-    private suspend fun finish(chatId: Long, content: String, staged: ChangeSet) {
+    private suspend fun finish(chatId: Long, content: String, staged: ChangeSet, trace: RoundTrace?) {
         val proposal = staged.takeUnless { it.isEmpty }
         chatDao.insertMessage(
             MessageEntity(
@@ -86,6 +131,7 @@ class Agent(
                 content = content.trim(),
                 proposalJson = proposal?.let { json.encodeToString(ChangeSet.serializer(), it) },
                 proposalStatus = proposal?.let { ProposalStatus.PENDING },
+                traceJson = trace?.let { json.encodeToString(RoundTrace.serializer(), it) },
             )
         )
         chatDao.chat(chatId)?.let { chatDao.updateChat(it.copy(updatedAt = System.currentTimeMillis())) }
@@ -146,6 +192,7 @@ class Agent(
 
     companion object {
         const val MAX_ROUNDS = 16
+        const val STOPPED_MESSAGE = "Stopped."
 
         fun systemPrompt(today: LocalDate) = """
             You are the assistant inside Strata, a private personal-finance app on the user's phone. Today is $today.

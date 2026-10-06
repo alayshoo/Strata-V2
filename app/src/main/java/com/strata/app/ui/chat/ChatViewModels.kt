@@ -61,4 +61,5 @@ class ConversationViewModel(private val session: Session, private val chatId: Lo
     fun discard(p: ProposalUi) = session.chatController.discard(p.messageId)
     fun undo(p: ProposalUi) { p.importId?.let { session.chatController.undo(it) } }
     fun dismissError() = session.chatController.dismissError(chatId)
+    fun stop() = session.chatController.stop(chatId)
 }
