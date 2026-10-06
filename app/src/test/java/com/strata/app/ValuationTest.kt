@@ -4,6 +4,7 @@ import com.strata.app.domain.FlowItem
 import com.strata.app.domain.FxTable
 import com.strata.app.domain.Granularity
 import com.strata.app.domain.TimeRange
+import com.strata.app.domain.ValueFlow
 import com.strata.app.domain.ValuePoint
 import com.strata.app.domain.ValuedProduct
 import com.strata.app.domain.Valuator
@@ -13,6 +14,7 @@ import com.strata.app.domain.netWorth
 import com.strata.app.domain.spendingByCategory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -32,6 +34,39 @@ class ValuationTest {
         assertNull(v.byAssetClass(d("2026-01-30"))[10])
         assertEquals(0, bd("100").compareTo(v.byAssetClass(d("2026-03-30"))[10]))
         assertEquals(0, bd("300").compareTo(v.byAssetClass(d("2026-06-01"))[10]))
+    }
+
+    @Test fun rebuildsHistoryAroundBalancesWithTransactions() {
+        // A full-history export: flows from the first deposit, one closing balance at the end.
+        val v = Valuator(
+            listOf(ValuedProduct(1, 10, "EUR")),
+            listOf(ValuePoint(1, d("2026-10-01"), bd("1300"))),
+            fx,
+            listOf(
+                ValueFlow(1, d("2025-05-13"), bd("1000")),
+                ValueFlow(1, d("2025-09-04"), bd("500")),
+                ValueFlow(1, d("2026-05-02"), bd("-200")),
+                ValueFlow(1, d("2026-10-05"), bd("50")),
+            ),
+        )
+        assertNull(v.valueAt(1, d("2025-05-12"))) // before the product's first record
+        assertEquals(0, bd("1000").compareTo(v.valueAt(1, d("2025-06-01"))))
+        assertEquals(0, bd("1500").compareTo(v.valueAt(1, d("2026-01-01"))))
+        assertEquals(0, bd("1300").compareTo(v.valueAt(1, d("2026-10-01")))) // the balance itself
+        assertEquals(0, bd("1350").compareTo(v.valueAt(1, d("2026-10-06")))) // rolled forward after it
+    }
+
+    @Test fun valuesUnitHoldingsAtLatestKnownPrice() {
+        val v = Valuator(
+            listOf(ValuedProduct(2, 20, "EUR")),
+            listOf(ValuePoint(2, d("2026-10-01"), bd("973.03"), bd("881.23"), bd("1.1042"))),
+            fx,
+            listOf(ValueFlow(2, d("2025-11-10"), bd("998.88"), bd("879")), ValueFlow(2, d("2025-11-10"), bd("2.53"), bd("2.23"))),
+        )
+        // 881.23 units bought at about 1.1364 each; before the snapshot the trade price is used.
+        val earlier = v.valueAt(2, d("2026-01-01"))!!
+        assertTrue(earlier > bd("995") && earlier < bd("1005"))
+        assertEquals(0, bd("973.054166").compareTo(v.valueAt(2, d("2026-10-02"))!!.setScale(6, java.math.RoundingMode.HALF_UP)))
     }
 
     @Test fun convertsWithRateOnOrBeforeDate() {

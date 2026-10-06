@@ -57,10 +57,11 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
     val liabilityIds = input.assetClasses.filter { it.isLiability }.map { it.id }.toSet()
     val valuator = Valuator(
         input.products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
-        input.snapshots.map { ValuePoint(it.productId, it.date, it.value) },
+        input.snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity, it.unitPrice) },
         input.fx,
+        input.transactions.map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
     )
-    val earliest = listOfNotNull(valuator.earliest, input.transactions.minOfOrNull { it.date }).minOrNull()
+    val earliest = valuator.earliest
     val start = range.start(today, earliest)
 
     val nowByClass = valuator.byAssetClass(today)
@@ -74,7 +75,8 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
     }
 
     // Plot where values actually change; carrying forward daily would draw a staircase.
-    val changeDates = (input.snapshots.map { it.date }.filter { it > start && it < today } + start + today).distinct().sorted()
+    val changeDates = (input.snapshots.map { it.date } + input.transactions.map { it.date })
+        .filter { it > start && it < today }.plus(listOf(start, today)).distinct().sorted()
     val lineDates = if (changeDates.size <= 400) changeDates else bucketEnds(start, today, lineGranularity(start, today))
     val line = lineDates.map { d ->
         LinePoint(d, netWorth(valuator.byAssetClass(d), liabilityIds).toDouble())
@@ -118,7 +120,7 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
         spending = spending,
         categories = categories,
         missingFx = valuator.missingCurrencies.toSet(),
-        hasData = input.snapshots.isNotEmpty(),
+        hasData = input.snapshots.isNotEmpty() || input.transactions.isNotEmpty(),
         hasFlows = flowItems.isNotEmpty(),
         loading = false,
     )

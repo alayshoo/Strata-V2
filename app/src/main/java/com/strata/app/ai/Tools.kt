@@ -5,6 +5,7 @@ import com.strata.app.data.db.StrataDatabase
 import com.strata.app.data.db.TxKind
 import com.strata.app.domain.FlowItem
 import com.strata.app.domain.FxTable
+import com.strata.app.domain.ValueFlow
 import com.strata.app.domain.ValuePoint
 import com.strata.app.domain.ValuedProduct
 import com.strata.app.domain.Valuator
@@ -206,7 +207,28 @@ object ToolSpecs {
                 listOf("transaction_ids"),
             )
         )
-        add(tool("get_staged_changes", "Show everything staged so far in this turn."))
+        add(
+            tool(
+                "sum_transactions",
+                "Exact totals of a product's transactions, recorded and staged: count, sum of amounts, sum of quantities. " +
+                    "Use this instead of adding numbers yourself, e.g. to derive a closing balance from a full-history export.",
+                props(
+                    *productPointer,
+                    "from" to prop("string", "Start date, YYYY-MM-DD, inclusive."),
+                    "to" to prop("string", "End date, YYYY-MM-DD, inclusive."),
+                ),
+            )
+        )
+        add(
+            tool(
+                "calculate",
+                "Exact decimal arithmetic for small one-off sums, e.g. units times price or a percentage. " +
+                    "Supports + - * / ( ) and %. For totals over many rows use sum_transactions instead of typing them in.",
+                props("expression" to prop("string", "For example \"881.23 * 1.1042\" or \"(7240.39 + 973.03) * 2%\".")),
+                listOf("expression"),
+            )
+        )
+        add(tool("get_staged_changes", "Show everything staged so far in this turn, plus balance checks against the transactions."))
         add(tool("clear_staged_changes", "Discard everything staged in this turn to start over."))
     }
 }
@@ -251,6 +273,8 @@ class ToolExecutor(
         "stage_snapshots" -> "Staged balances"
         "stage_transactions" -> "Staged transactions"
         "link_transfer" -> "Staged a transfer link"
+        "sum_transactions" -> "Added up transactions"
+        "calculate" -> "Calculated"
         "get_staged_changes" -> "Reviewed staged changes"
         "clear_staged_changes" -> "Cleared staged changes"
         else -> name
@@ -320,7 +344,16 @@ class ToolExecutor(
             staged = staged.copy(links = staged.links + TransferLink(ids))
             buildJsonObject { put("staged", "link of ${ids.joinToString()}") }
         }
-        "get_staged_changes" -> json.parseToJsonElement(json.encodeToString(ChangeSet.serializer(), staged))
+        "sum_transactions" -> sumTransactions(args)
+        "calculate" -> {
+            val expression = args.string("expression") ?: throw ToolError("expression is required")
+            val result = try { Calculator.evaluate(expression) } catch (e: Calculator.CalcError) { throw ToolError(e.message ?: "Invalid expression") }
+            buildJsonObject { put("expression", expression); put("result", result.toPlainString()) }
+        }
+        "get_staged_changes" -> buildJsonObject {
+            put("staged", json.parseToJsonElement(json.encodeToString(ChangeSet.serializer(), staged)))
+            checks()?.let { put("checks", it) }
+        }
         "clear_staged_changes" -> {
             staged = ChangeSet(fileNames = staged.fileNames)
             buildJsonObject { put("cleared", true) }
@@ -353,8 +386,9 @@ class ToolExecutor(
         val snapshots = db.backupDao().snapshots()
         val valuator = Valuator(
             products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
-            snapshots.map { ValuePoint(it.productId, it.date, it.value) },
+            snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity, it.unitPrice) },
             fxTable(),
+            db.backupDao().transactions().map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
         )
         val byClass = valuator.byAssetClass(date)
         val liabilities = classes.filter { it.isLiability }.map { it.id }.toSet()
@@ -368,10 +402,13 @@ class ToolExecutor(
             }
             putJsonArray("products") {
                 products.forEach { p ->
-                    val point = valuator.latestOnOrBefore(p.id, date) ?: return@forEach
+                    val value = valuator.valueAt(p.id, date) ?: return@forEach
+                    val balance = valuator.latestOnOrBefore(p.id, date)
                     addJsonObject {
                         put("id", p.id); put("name", p.name); put("currency", p.currency)
-                        put("value", point.value.toPlainString()); put("as_of", point.date.toString())
+                        put("value", value.money())
+                        // Values after the last recorded balance are rolled forward with transactions.
+                        balance?.let { put("last_balance", it.value.toPlainString()); put("last_balance_date", it.date.toString()) }
                         valuator.productValueEur(p.id, date)?.let { put("value_eur", it.money()) }
                     }
                 }
@@ -441,6 +478,7 @@ class ToolExecutor(
         return buildJsonObject {
             put("staged", accepted.size)
             if (skipped.isNotEmpty()) putJsonArray("skipped") { skipped.forEach { add(it) } }
+            checks()?.let { put("checks", it) }
         }
     }
 
@@ -481,6 +519,44 @@ class ToolExecutor(
         return buildJsonObject {
             put("staged", accepted.size)
             if (skipped.isNotEmpty()) putJsonArray("skipped") { skipped.forEach { add(it) } }
+            checks()?.let { put("checks", it) }
+        }
+    }
+
+    private suspend fun sumTransactions(args: JsonObject): JsonObject {
+        val pointer = pointer(args, 0)
+        val from = args.date("from") ?: LocalDate.of(1900, 1, 1)
+        val to = args.date("to") ?: LocalDate.of(2999, 1, 1)
+        val stored = pointer.id?.let { id -> db.ledgerDao().transactions(id, from, to, null, Int.MAX_VALUE) }.orEmpty()
+            .map { Triple(it.date, it.amount, it.quantity) }
+        val stagedRows = staged.transactions.filter { it.product == pointer }
+            .map { Triple(LocalDate.parse(it.date), BigDecimal(it.amount), it.quantity?.let(::BigDecimal)) }
+            .filter { it.first in from..to }
+        val rows = stored + stagedRows
+        return buildJsonObject {
+            put("count", rows.size)
+            put("recorded", stored.size)
+            put("staged", stagedRows.size)
+            put("sum_amount", rows.fold(BigDecimal.ZERO) { acc, r -> acc + r.second }.toPlainString())
+            put("sum_quantity", rows.mapNotNull { it.third }.fold(BigDecimal.ZERO, BigDecimal::add).toPlainString())
+            rows.minOfOrNull { it.first }?.let { put("first_date", it.toString()) }
+            rows.maxOfOrNull { it.first }?.let { put("last_date", it.toString()) }
+        }
+    }
+
+    /** Mismatches between staged balances and the flows behind them, phrased for the model. */
+    private suspend fun checks(): JsonArray? {
+        val findings = Reconcile.checkStaged(staged, db.backupDao().snapshots(), db.backupDao().transactions())
+        val unlinked = Reconcile.unlinkedTrades(staged)
+        if (findings.isEmpty() && unlinked == 0) return null
+        return buildJsonArray {
+            findings.forEach { f ->
+                val who = f.product.id?.let { "product $it" } ?: "new product '${f.product.ref}'"
+                val what = if (f.measure == Reconcile.Measure.UNITS) "units" else "value"
+                val base = f.since?.let { "the balance on $it plus" } ?: "the sum of all"
+                add("MISMATCH $who on ${f.date}: staged $what ${f.stated.toPlainString()}, but $base its transactions gives ${f.implied.toPlainString()}. Fix the balance or the transactions, or explain to the user why they differ.")
+            }
+            if (unlinked > 0) add("$unlinked trade leg(s) have no transfer_key or link_to_transaction_id. Each trade needs a cash leg and a security leg sharing a transfer_key.")
         }
     }
 

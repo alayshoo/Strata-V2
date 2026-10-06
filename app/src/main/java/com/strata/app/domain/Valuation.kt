@@ -76,20 +76,95 @@ class FxTable(rates: Map<String, List<Pair<LocalDate, BigDecimal>>>) {
 }
 
 data class ValuedProduct(val id: Long, val assetClassId: Long, val currency: String)
-data class ValuePoint(val productId: Long, val date: LocalDate, val value: BigDecimal)
+data class ValuePoint(
+    val productId: Long,
+    val date: LocalDate,
+    val value: BigDecimal,
+    val quantity: BigDecimal? = null,
+    val unitPrice: BigDecimal? = null,
+)
+data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDecimal, val quantity: BigDecimal? = null)
 
-/** Values every product at a date by carrying its latest snapshot forward. */
+/**
+ * Values products at any date. Recorded balances are anchors and are exact on their own dates;
+ * transactions fill the gaps between them:
+ *
+ * - after a balance: that balance plus the flows since;
+ * - before the first balance: the next balance minus the flows in between;
+ * - before a product's first record of any kind: nothing.
+ *
+ * Products that hold units (any snapshot or flow carries a quantity) are rolled on units and
+ * valued at the latest known unit price, taken from snapshots and trades.
+ */
 class Valuator(
     products: List<ValuedProduct>,
     snapshots: List<ValuePoint>,
     private val fx: FxTable,
+    flows: List<ValueFlow> = emptyList(),
 ) {
     private val products = products.associateBy { it.id }
     private val history: Map<Long, List<ValuePoint>> =
         snapshots.filter { it.productId in this.products }.groupBy { it.productId }
             .mapValues { (_, list) -> list.sortedBy { it.date } }
 
-    val earliest: LocalDate? = snapshots.minOfOrNull { it.date }
+    /** Flows per product, sorted, with running totals for O(log n) range sums. */
+    private class Ledger(val dates: List<LocalDate>, val cumAmount: List<BigDecimal>, val cumUnits: List<BigDecimal>) {
+        private fun indexThrough(date: LocalDate): Int {
+            var lo = 0
+            var hi = dates.lastIndex
+            var found = -1
+            while (lo <= hi) {
+                val mid = (lo + hi) ushr 1
+                if (dates[mid] <= date) { found = mid; lo = mid + 1 } else hi = mid - 1
+            }
+            return found
+        }
+        fun amountThrough(date: LocalDate): BigDecimal = indexThrough(date).let { if (it < 0) BigDecimal.ZERO else cumAmount[it] }
+        fun unitsThrough(date: LocalDate): BigDecimal = indexThrough(date).let { if (it < 0) BigDecimal.ZERO else cumUnits[it] }
+    }
+
+    private val ledgers: Map<Long, Ledger> = flows.filter { it.productId in this.products }.groupBy { it.productId }
+        .mapValues { (_, list) ->
+            val sorted = list.sortedBy { it.date }
+            var amount = BigDecimal.ZERO
+            var units = BigDecimal.ZERO
+            val cumA = ArrayList<BigDecimal>(sorted.size)
+            val cumU = ArrayList<BigDecimal>(sorted.size)
+            for (f in sorted) {
+                amount += f.amount
+                units += f.quantity ?: BigDecimal.ZERO
+                cumA += amount
+                cumU += units
+            }
+            Ledger(sorted.map { it.date }, cumA, cumU)
+        }
+
+    private val firstSeen: Map<Long, LocalDate> = buildMap {
+        for ((id, list) in history) put(id, list.first().date)
+        for ((id, l) in ledgers) put(id, minOf(get(id) ?: l.dates.first(), l.dates.first()))
+    }
+
+    private val unitBased: Set<Long> = buildSet {
+        history.forEach { (id, list) -> if (list.any { it.quantity != null }) add(id) }
+        flows.forEach { if (it.quantity != null && it.quantity.signum() != 0) add(it.productId) }
+    }
+
+    /** Known unit prices per product, sorted by date. */
+    private val prices: Map<Long, List<Pair<LocalDate, BigDecimal>>> = buildMap {
+        val all = HashMap<Long, MutableList<Pair<LocalDate, BigDecimal>>>()
+        for (p in snapshots) {
+            val price = p.unitPrice ?: p.quantity?.takeIf { it.signum() != 0 }?.let { p.value.divide(it, MathContext.DECIMAL64) }
+            if (price != null) all.getOrPut(p.productId) { mutableListOf() } += p.date to price
+        }
+        for (f in flows) {
+            val q = f.quantity ?: continue
+            if (q.signum() == 0 || f.amount.signum() == 0) continue
+            all.getOrPut(f.productId) { mutableListOf() } += f.date to f.amount.divide(q, MathContext.DECIMAL64).abs()
+        }
+        all.forEach { (id, list) -> put(id, list.sortedBy { it.first }) }
+    }
+
+    val earliest: LocalDate? = firstSeen.values.minOrNull()
 
     /** Currencies that had no rate when we needed one. */
     val missingCurrencies = mutableSetOf<String>()
@@ -106,12 +181,47 @@ class Valuator(
         return found
     }
 
+    private fun firstAfter(productId: Long, date: LocalDate): ValuePoint? = history[productId]?.firstOrNull { it.date > date }
+
+    /** Value in the product's own currency at [date], or null before the product's first record. */
+    fun valueAt(productId: Long, date: LocalDate): BigDecimal? {
+        val first = firstSeen[productId] ?: return null
+        if (date < first) return null
+        val ledger = ledgers[productId]
+        return if (productId in unitBased) {
+            val units = anchored(productId, date, ledger, units = true) ?: return null
+            if (units.signum() == 0) return BigDecimal.ZERO
+            val price = priceAt(productId, date) ?: return null
+            units.multiply(price, MathContext.DECIMAL64)
+        } else {
+            anchored(productId, date, ledger, units = false)
+        }
+    }
+
+    private fun anchored(productId: Long, date: LocalDate, ledger: Ledger?, units: Boolean): BigDecimal? {
+        fun through(d: LocalDate) = if (ledger == null) BigDecimal.ZERO else if (units) ledger.unitsThrough(d) else ledger.amountThrough(d)
+        fun measure(p: ValuePoint): BigDecimal? = if (units) p.quantity else p.value
+        val previous = latestOnOrBefore(productId, date)
+        if (previous != null) {
+            // A unit-based snapshot without a quantity cannot anchor units; fall through to the next one.
+            measure(previous)?.let { return it + through(date) - through(previous.date) }
+        }
+        val next = firstAfter(productId, date)
+        if (next != null) measure(next)?.let { return it - (through(next.date) - through(date)) }
+        return if (ledger != null) through(date) else null
+    }
+
+    private fun priceAt(productId: Long, date: LocalDate): BigDecimal? {
+        val list = prices[productId]?.takeIf { it.isNotEmpty() } ?: return null
+        return list.lastOrNull { it.first <= date }?.second ?: list.first().second
+    }
+
     /** EUR value per asset class at [date]; positive numbers, liabilities included as owed. */
     fun byAssetClass(date: LocalDate): Map<Long, BigDecimal> {
         val out = HashMap<Long, BigDecimal>()
         for (product in products.values) {
-            val point = latestOnOrBefore(product.id, date) ?: continue
-            val eur = fx.toEur(point.value, product.currency, date)
+            val value = valueAt(product.id, date) ?: continue
+            val eur = fx.toEur(value, product.currency, date)
             if (eur == null) { missingCurrencies += product.currency; continue }
             out.merge(product.assetClassId, eur, BigDecimal::add)
         }
@@ -120,8 +230,8 @@ class Valuator(
 
     fun productValueEur(productId: Long, date: LocalDate): BigDecimal? {
         val product = products[productId] ?: return null
-        val point = latestOnOrBefore(productId, date) ?: return null
-        return fx.toEur(point.value, product.currency, date)
+        val value = valueAt(productId, date) ?: return null
+        return fx.toEur(value, product.currency, date)
     }
 }
 

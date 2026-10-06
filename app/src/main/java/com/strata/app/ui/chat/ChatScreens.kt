@@ -350,6 +350,7 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                 }
             }
             Spacer(Modifier.height(10.dp))
+            if (p.warnings.isNotEmpty()) CheckWarnings(p.warnings)
             p.groups.forEach { group ->
                 Text(group.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
                 val shown = if (expanded) group.lines else group.lines.take(3)
@@ -384,6 +385,20 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                     else -> Unit
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CheckWarnings(warnings: List<String>) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.ErrorOutline, null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Check before applying", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+            }
+            warnings.forEach { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer) }
         }
     }
 }

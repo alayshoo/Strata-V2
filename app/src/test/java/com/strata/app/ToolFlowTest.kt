@@ -99,6 +99,30 @@ class ToolFlowTest {
         assertTrue(tools.staged.isEmpty)
     }
 
+    @Test fun sumsAndChecksStagedBalances() = runBlocking {
+        tools.execute(
+            "stage_transactions",
+            """{"items":[
+                {"product_id":2,"date":"2025-05-13","amount":"950","description":"In","kind":"transfer"},
+                {"product_id":2,"date":"2025-06-01","amount":"2.09","description":"Interest","kind":"interest"},
+                {"product_id":2,"date":"2026-05-02","amount":"-321.44","description":"KLM","kind":"expense"}
+            ]}""",
+        )
+        val sum = tools.execute("sum_transactions", """{"product_id":2}""")
+        assertTrue(sum, sum.contains("\"sum_amount\":\"630.65\""))
+        assertTrue(sum.contains("\"staged\":3"))
+
+        val wrong = tools.execute("stage_snapshots", """{"items":[{"product_id":2,"date":"2026-10-01","value":"0.00"}]}""")
+        assertTrue(wrong, wrong.contains("MISMATCH product 2"))
+        assertTrue(wrong.contains("630.65"))
+
+        tools.execute("clear_staged_changes", "{}")
+        val calc = tools.execute("calculate", """{"expression":"881.23 * 1.1042"}""")
+        assertTrue(calc, calc.contains("973.054166"))
+        val bad = tools.execute("calculate", """{"expression":"1,5 + 2"}""")
+        assertTrue(bad, bad.contains("error"))
+    }
+
     @Test fun skipsDuplicatesAndLinksExistingLegs() = runBlocking {
         val existing = db.ledgerDao().insertTransaction(
             TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 25), amount = BigDecimal("800"), description = "Deposit", kind = TxKind.TRANSFER)

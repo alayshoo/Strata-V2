@@ -210,7 +210,20 @@ class Agent(
               with quantity on the security leg), dividend, interest, fee.
             - Link both legs of a transfer or trade. Within one turn give both legs the same transfer_key. When only one side is in this
               statement, call find_transfer_candidates and use link_to_transaction_id if the other side already exists.
+            - A trade is always two legs with the same transfer_key: on the cash product the signed cash amount (a buy is negative),
+              and on the security product the opposite amount (a buy is positive, the cost) with the units in quantity
+              (negative when selling). Broker fees and taxes are separate fee transactions on the cash product.
+              A row's effect on cash is its amount plus its fee plus its tax.
             - Amounts stay in the product's currency. The app converts to EUR with ECB rates; record fx_rate only when the statement shows one.
+
+            Numbers
+            - Never do arithmetic in your head. Use sum_transactions for totals over many rows (after staging them), and calculate
+              for small one-off sums such as units times price.
+            - Balances: use the closing balance the statement prints. If it prints none (many CSV exports), and the file covers the
+              account from its first movement, the closing cash balance is sum_amount from sum_transactions for that product;
+              for a security, the units held are sum_quantity. Say in the reply that you derived it.
+            - Staging tools return "checks". A MISMATCH means a balance disagrees with its transactions. Never ignore it: correct
+              what you staged (clear_staged_changes and redo if needed) or tell the user plainly why they differ.
 
             How to work
             - Start by reading the lists and products you need. Never guess ids.

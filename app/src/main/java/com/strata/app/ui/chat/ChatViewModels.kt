@@ -30,7 +30,10 @@ class ConversationViewModel(private val session: Session, private val chatId: Lo
     private val _pending = MutableStateFlow<List<PendingFile>>(emptyList())
     val pending: StateFlow<List<PendingFile>> = _pending
 
-    private val lookup = combine(session.ledger.products, session.setup.sources, session.setup.spendingCategories) { p, s, c -> Lookup(p, s, c) }
+    private val lookup = combine(
+        session.ledger.products, session.setup.sources, session.setup.spendingCategories,
+        session.ledger.snapshots, session.ledger.transactions,
+    ) { p, s, c, snaps, txs -> Lookup(p, s, c, snaps, txs) }
 
     private val items = combine(session.chats.messages(chatId), session.chats.attachments(chatId), lookup) { m, a, l ->
         buildChatItems(m, a, l)

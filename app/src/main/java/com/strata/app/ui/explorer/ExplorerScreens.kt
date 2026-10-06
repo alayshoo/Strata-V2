@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.Receipt
 import androidx.compose.material.icons.rounded.Search
@@ -51,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.strata.app.ai.Reconcile
 import com.strata.app.data.db.ImportEntity
 import com.strata.app.data.db.ProductEntity
 import com.strata.app.data.db.SnapshotEntity
@@ -318,6 +320,22 @@ private fun androidx.compose.foundation.lazy.LazyListScope.importItems(imports: 
 
 // ---------- Product detail ----------
 
+/** Explains the latest mismatch between this product's balances and its transactions, if any. */
+private fun balanceCheck(product: ProductEntity, snapshots: List<SnapshotEntity>, transactions: List<TransactionEntity>): String? {
+    val key = Reconcile.Key(product.id, null)
+    val findings = Reconcile.check(
+        mapOf(key to snapshots.map { Reconcile.Point(it.date, it.value, it.quantity) }),
+        mapOf(key to transactions.map { Reconcile.Flow(it.date, it.amount, it.quantity, it.kind) }),
+    )
+    val f = findings.maxByOrNull { it.date } ?: return null
+    val basis = if (f.since == null) "all recorded transactions" else "the balance on ${MoneyFormat.date(f.since)} plus the transactions since"
+    val more = if (findings.size > 1) " ${findings.size - 1} earlier balance${if (findings.size == 2) " also disagrees" else "s also disagree"}." else ""
+    return if (f.measure == Reconcile.Measure.UNITS)
+        "On ${MoneyFormat.date(f.date)} ${MoneyFormat.quantity(f.stated)} units are recorded, but $basis give ${MoneyFormat.quantity(f.implied)}.$more"
+    else
+        "On ${MoneyFormat.date(f.date)} the balance is ${MoneyFormat.full(f.stated, product.currency)}, but $basis add up to ${MoneyFormat.full(f.implied, product.currency)}.$more"
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ProductDetailScreen(
@@ -392,6 +410,20 @@ fun ProductDetailScreen(
                     Text(snapshots.firstOrNull()?.let { MoneyFormat.full(it.value, product.currency) } ?: "No balance yet", style = MaterialTheme.typography.displaySmall)
                     snapshots.firstOrNull()?.let {
                         Text("as of ${MoneyFormat.date(it.date)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            balanceCheck(product, snapshots, transactions)?.let { message ->
+                item(key = "check") {
+                    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium, modifier = Modifier.padding(top = 10.dp)) {
+                        Row(Modifier.padding(14.dp)) {
+                            Icon(Icons.Rounded.ErrorOutline, null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Balance and transactions disagree", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                                Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+                            }
+                        }
                     }
                 }
             }

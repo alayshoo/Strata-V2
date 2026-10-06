@@ -11,7 +11,10 @@ import com.strata.app.data.db.SourceEntity
 import com.strata.app.data.db.SpendingCategoryEntity
 import com.strata.app.data.db.TxKind
 import com.strata.app.domain.MoneyFormat
+import com.strata.app.ai.Reconcile
 import com.strata.app.ai.RoundTrace
+import com.strata.app.data.db.SnapshotEntity
+import com.strata.app.data.db.TransactionEntity
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -36,6 +39,8 @@ data class ProposalUi(
     val status: ProposalStatus,
     val importId: Long?,
     val groups: List<ProposalGroup>,
+    /** Balance checks that failed; shown above the rows while the card is pending. */
+    val warnings: List<String> = emptyList(),
 )
 
 sealed interface ChatItem {
@@ -75,6 +80,8 @@ data class Lookup(
     val products: List<ProductEntity>,
     val sources: List<SourceEntity>,
     val categories: List<SpendingCategoryEntity>,
+    val snapshots: List<SnapshotEntity> = emptyList(),
+    val transactions: List<TransactionEntity> = emptyList(),
 )
 
 private val json = Json { ignoreUnknownKeys = true }
@@ -93,6 +100,8 @@ private val stepNames = mapOf(
     "stage_snapshots" to "Staged balances",
     "stage_transactions" to "Staged transactions",
     "link_transfer" to "Linked a transfer",
+    "sum_transactions" to "Added up transactions",
+    "calculate" to "Calculated",
     "get_staged_changes" to "Reviewed the draft",
     "clear_staged_changes" to "Started the draft over",
 )
@@ -197,12 +206,31 @@ private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): Pro
             ProposalLine("Link ${it.transactionIds.size} legs", it.transactionIds.joinToString(" ↔ ") { id -> "#$id" })
         }))
     }
+    val status = message.proposalStatus ?: ProposalStatus.PENDING
+    // Once applied, staged rows are also stored, so checking again would count them twice.
+    val warnings = if (status != ProposalStatus.PENDING) emptyList() else buildList {
+        Reconcile.checkStaged(changes, lookup.snapshots, lookup.transactions).forEach { f ->
+            val name = f.product.id?.let { products[it]?.name } ?: f.product.ref?.let { staged[it]?.name } ?: "A product"
+            val currency = f.product.id?.let { products[it]?.currency } ?: f.product.ref?.let { staged[it]?.currency } ?: "EUR"
+            val date = MoneyFormat.date(f.date)
+            val basis = if (f.since == null) "all its recorded transactions" else "the balance on ${MoneyFormat.date(f.since)} plus the transactions since"
+            add(
+                if (f.measure == Reconcile.Measure.UNITS)
+                    "$name, $date: ${MoneyFormat.quantity(f.stated)} units recorded, but $basis give ${MoneyFormat.quantity(f.implied)}."
+                else
+                    "$name, $date: the balance says ${MoneyFormat.full(f.stated, currency)}, but $basis add up to ${MoneyFormat.full(f.implied, currency)}."
+            )
+        }
+        val unlinked = Reconcile.unlinkedTrades(changes)
+        if (unlinked > 0) add("$unlinked trade leg${if (unlinked == 1) " isn't" else "s aren't"} linked to the other side of the trade.")
+    }
     return ProposalUi(
         messageId = message.id,
         json = raw,
         headline = changes.headline().replaceFirstChar { it.uppercase() },
-        status = message.proposalStatus ?: ProposalStatus.PENDING,
+        status = status,
         importId = message.importId,
         groups = groups,
+        warnings = warnings,
     )
 }
