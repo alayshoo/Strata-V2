@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Four offset layers, the same motif as the lock screen. Safe zone is the central 66dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M42,32h26a5,5 0,0 1,0 10h-26a5,5 0,0 1,0 -10z" />
+    <path android:fillColor="#F2A400" android:pathData="M34,45h30a5,5 0,0 1,0 10h-30a5,5 0,0 1,0 -10z" />
+    <path android:fillColor="#E8458F" android:pathData="M46,58h28a5,5 0,0 1,0 10h-28a5,5 0,0 1,0 -10z" />
+    <path android:fillColor="#19C29A" android:pathData="M38,71h22a5,5 0,0 1,0 10h-22a5,5 0,0 1,0 -10z" />
+</vector>

@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   pull_request:
 
 jobs:
@@ -18,4 +18,24 @@ jobs:
         with:
           packages: "platforms;android-37.2"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew assembleDebug testDebugUnitTest
+
+      # Optional: sign with your own key so updates install over each other (see README).
+      - name: Decode signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.STRATA_KEYSTORE_B64 }}
+        if: env.KEYSTORE_B64 != ''
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/strata.jks"
+          echo "STRATA_KEYSTORE=$RUNNER_TEMP/strata.jks" >> "$GITHUB_ENV"
+
+      - name: Test and build
+        env:
+          STRATA_KEYSTORE_PASSWORD: ${{ secrets.STRATA_KEYSTORE_PASSWORD }}
+          STRATA_KEY_ALIAS: ${{ secrets.STRATA_KEY_ALIAS }}
+          STRATA_KEY_PASSWORD: ${{ secrets.STRATA_KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strata-apk
+          path: app/build/outputs/apk/release/app-release.apk

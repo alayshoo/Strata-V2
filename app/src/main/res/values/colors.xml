@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="strata_background">#F3F4FB</color>
+    <color name="strata_cobalt">#2E3FE6</color>
+    <color name="strata_cobalt_deep">#1C27B0</color>
+</resources>
