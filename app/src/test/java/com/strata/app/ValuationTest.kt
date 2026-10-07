@@ -138,6 +138,30 @@ class ValuationTest {
         assertEquals(0, bd("650").compareTo(v.valueAt(1, d("2026-10-07"))))
     }
 
+    @Test fun aSplitPricesTheNewUnitsWhateverTheOrderOfItsLegs() {
+        // 0.138 units at about 1,083 become 13.848 at about 10.83; the legs arrive newest first, as the app lists them.
+        val flows = listOf(
+            ValueFlow(1, d("2025-12-15"), bd("150.02"), bd("13.848401")),
+            ValueFlow(1, d("2025-12-15"), bd("-150.02"), bd("-0.13848401")),
+            ValueFlow(1, d("2025-11-10"), bd("150.02"), bd("0.13848401")),
+        )
+        val v = Valuator(listOf(ValuedProduct(1, 20, "EUR")), emptyList(), fx, flows)
+        assertEquals(0, bd("150.02").compareTo(v.valueAt(1, d("2025-12-01"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+        assertEquals(0, bd("150.02").compareTo(v.valueAt(1, d("2025-12-20"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+        val reversed = Valuator(listOf(ValuedProduct(1, 20, "EUR")), emptyList(), fx, flows.reversed())
+        assertEquals(0, bd("150.02").compareTo(reversed.valueAt(1, d("2025-12-20"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+    }
+
+    @Test fun aBalanceIsExactOnItsDateEvenWithATradeThatDay() {
+        val v = Valuator(
+            listOf(ValuedProduct(1, 20, "EUR")),
+            listOf(ValuePoint(1, d("2026-09-30"), bd("110"), bd("11"))),
+            fx,
+            listOf(ValueFlow(1, d("2026-09-30"), bd("12"), bd("1"))),
+        )
+        assertEquals(0, bd("110").compareTo(v.valueAt(1, d("2026-09-30"))!!.setScale(0, java.math.RoundingMode.HALF_UP)))
+    }
+
     @Test fun convertsWithRateOnOrBeforeDate() {
         assertEquals(0, bd("100").compareTo(fx.toEur(bd("110"), "USD", d("2026-01-15"))))
         // Weekend after a rate change uses the newest earlier rate.

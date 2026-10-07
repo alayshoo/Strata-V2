@@ -182,21 +182,24 @@ class Valuator(
         }
     }
 
-    /** Known unit prices per product, sorted by date. */
+    /**
+     * Known unit prices per product, sorted by date. Within a day, units leaving come first, then units
+     * arriving, then the balance: after a split the new units' price applies, and a balance is exact on its date.
+     */
     private val prices: Map<Long, List<Pair<LocalDate, BigDecimal>>> = buildMap {
-        val all = HashMap<Long, MutableList<Pair<LocalDate, BigDecimal>>>()
+        val all = HashMap<Long, MutableList<Triple<LocalDate, Int, BigDecimal>>>()
         for (p in snapshots) {
             // Value / units, never the quoted unit price: brokers quote in the trading currency or unit
             // (pence, dollars) while the value is in the product's currency.
             val price = p.quantity?.takeIf { it.signum() != 0 }?.let { p.value.divide(it, MathContext.DECIMAL64) }
-            if (price != null) all.getOrPut(p.productId) { mutableListOf() } += p.date to price
+            if (price != null) all.getOrPut(p.productId) { mutableListOf() } += Triple(p.date, 2, price)
         }
         for (f in flows) {
             val q = f.quantity ?: continue
             if (q.signum() == 0 || f.amount.signum() == 0) continue
-            all.getOrPut(f.productId) { mutableListOf() } += f.date to f.amount.divide(q, MathContext.DECIMAL64).abs()
+            all.getOrPut(f.productId) { mutableListOf() } += Triple(f.date, if (q.signum() < 0) 0 else 1, f.amount.divide(q, MathContext.DECIMAL64).abs())
         }
-        all.forEach { (id, list) -> put(id, list.sortedBy { it.first }) }
+        all.forEach { (id, list) -> put(id, list.sortedWith(compareBy({ it.first }, { it.second })).map { it.first to it.third }) }
     }
 
     val earliest: LocalDate? = firstSeen.values.minOrNull()
