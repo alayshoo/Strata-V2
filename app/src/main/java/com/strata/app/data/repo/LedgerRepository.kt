@@ -158,7 +158,7 @@ class LedgerRepository(private val db: StrataDatabase) {
         dao.deleteOrphanProductsOfImport(importId)
         if (revert != null) {
             // A balance put back only takes its day if nothing else holds it now.
-            fun dayFree(old: SnapshotEntity) = dao.snapshotOn(old.productId, old.date).let { it == null || it.id == old.id }
+            suspend fun dayFree(old: SnapshotEntity) = dao.snapshotOn(old.productId, old.date).let { it == null || it.id == old.id }
             for (old in revert.editedSnapshots) {
                 if (dao.snapshot(old.id) != null && dayFree(old)) dao.updateSnapshot(old)
             }
