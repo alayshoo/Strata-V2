@@ -391,7 +391,7 @@ class ToolExecutor(
         val snapshots = db.backupDao().snapshots()
         val valuator = Valuator(
             products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
-            snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity, it.unitPrice) },
+            snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
             fxTable(),
             db.backupDao().transactions().map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
         )

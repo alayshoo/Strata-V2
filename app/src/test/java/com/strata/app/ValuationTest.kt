@@ -59,14 +59,28 @@ class ValuationTest {
     @Test fun valuesUnitHoldingsAtLatestKnownPrice() {
         val v = Valuator(
             listOf(ValuedProduct(2, 20, "EUR")),
-            listOf(ValuePoint(2, d("2026-10-01"), bd("973.03"), bd("881.23"), bd("1.1042"))),
+            listOf(ValuePoint(2, d("2026-10-01"), bd("973.03"), bd("881.23"))),
             fx,
             listOf(ValueFlow(2, d("2025-11-10"), bd("998.88"), bd("879")), ValueFlow(2, d("2025-11-10"), bd("2.53"), bd("2.23"))),
         )
         // 881.23 units bought at about 1.1364 each; before the snapshot the trade price is used.
         val earlier = v.valueAt(2, d("2026-01-01"))!!
         assertTrue(earlier > bd("995") && earlier < bd("1005"))
-        assertEquals(0, bd("973.054166").compareTo(v.valueAt(2, d("2026-10-02"))!!.setScale(6, java.math.RoundingMode.HALF_UP)))
+        assertEquals(0, bd("973.03").compareTo(v.valueAt(2, d("2026-10-02"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+    }
+
+    @Test fun holdingsQuotedInAnotherUnitKeepTheirRecordedValue() {
+        // A London-listed ETF: the statement quotes p14,182 per unit but the holding is worth €466.65.
+        val v = Valuator(
+            listOf(ValuedProduct(3, 20, "EUR")),
+            listOf(ValuePoint(3, d("2026-09-30"), bd("466.65"), bd("2.81105556"))),
+            fx,
+            listOf(ValueFlow(3, d("2026-09-04"), bd("5.86"), bd("0.03452038"))),
+        )
+        assertEquals(0, bd("466.65").compareTo(v.valueAt(3, d("2026-10-07"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+        // Before the snapshot the trade's own euro price applies, not the pence quote.
+        val before = v.valueAt(3, d("2026-09-10"))!!
+        assertTrue(before.toString(), before > bd("400") && before < bd("600"))
     }
 
     @Test fun convertsWithRateOnOrBeforeDate() {
