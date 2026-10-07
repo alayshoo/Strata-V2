@@ -81,7 +81,6 @@ data class ValuePoint(
     val date: LocalDate,
     val value: BigDecimal,
     val quantity: BigDecimal? = null,
-    val unitPrice: BigDecimal? = null,
 )
 data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDecimal, val quantity: BigDecimal? = null)
 
@@ -94,7 +93,8 @@ data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDe
  * - before a product's first record of any kind: nothing.
  *
  * Products that hold units (any snapshot or flow carries a quantity) are rolled on units and
- * valued at the latest known unit price, taken from snapshots and trades.
+ * valued at the latest known price per unit in the product's currency: a snapshot's value divided
+ * by its units, or a trade's amount divided by its units.
  */
 class Valuator(
     products: List<ValuedProduct>,
@@ -153,7 +153,9 @@ class Valuator(
     private val prices: Map<Long, List<Pair<LocalDate, BigDecimal>>> = buildMap {
         val all = HashMap<Long, MutableList<Pair<LocalDate, BigDecimal>>>()
         for (p in snapshots) {
-            val price = p.unitPrice ?: p.quantity?.takeIf { it.signum() != 0 }?.let { p.value.divide(it, MathContext.DECIMAL64) }
+            // Value / units, never the quoted unit price: brokers quote in the trading currency or unit
+            // (pence, dollars) while the value is in the product's currency.
+            val price = p.quantity?.takeIf { it.signum() != 0 }?.let { p.value.divide(it, MathContext.DECIMAL64) }
             if (price != null) all.getOrPut(p.productId) { mutableListOf() } += p.date to price
         }
         for (f in flows) {
