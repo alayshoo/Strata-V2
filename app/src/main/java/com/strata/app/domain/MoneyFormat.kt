@@ -62,4 +62,20 @@ object MoneyFormat {
 
     private val dateFormat = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
     fun date(date: LocalDate): String = date.format(dateFormat)
+
+    private val monthYearFormat = DateTimeFormatter.ofPattern("MMMM yyyy")
+    fun monthYear(date: LocalDate): String = date.format(monthYearFormat)
+
+    private val monthFormat = DateTimeFormatter.ofPattern("MMMM")
+    fun month(date: LocalDate): String = date.format(monthFormat)
+
+    private val dayMonthFormat = DateTimeFormatter.ofPattern("d MMM")
+    fun dayMonth(date: LocalDate): String = date.format(dayMonthFormat)
+
+    /** Ratios on a chart axis: whole percents, one decimal only when needed. */
+    fun axisPercent(ratio: Double): String {
+        val v = ratio * 100
+        return if (kotlin.math.abs(v - kotlin.math.round(v)) < 0.05) "${kotlin.math.round(v).toLong()}%"
+        else String.format(Locale.getDefault(), "%.1f%%", v)
+    }
 }

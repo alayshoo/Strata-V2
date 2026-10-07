@@ -168,6 +168,12 @@ class Valuator(
 
     val earliest: LocalDate? = firstSeen.values.minOrNull()
 
+    /** The date of a product's first balance or transaction. */
+    fun firstRecord(productId: Long): LocalDate? = firstSeen[productId]
+
+    /** True for products valued on units and price rather than on their amount. */
+    fun holdsUnits(productId: Long): Boolean = productId in unitBased
+
     /** Currencies that had no rate when we needed one. */
     val missingCurrencies = mutableSetOf<String>()
 

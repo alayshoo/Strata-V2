@@ -3,6 +3,7 @@ package com.strata.app.domain
 import com.strata.app.data.db.AssetClassEntity
 import com.strata.app.data.db.ProductEntity
 import com.strata.app.data.db.SnapshotEntity
+import com.strata.app.data.db.SourceEntity
 import com.strata.app.data.db.SpendingCategoryEntity
 import com.strata.app.data.db.TransactionEntity
 import com.strata.app.data.db.TxKind
@@ -36,6 +37,7 @@ data class DashboardInput(
     val transactions: List<TransactionEntity>,
     val categories: List<SpendingCategoryEntity>,
     val fx: FxTable,
+    val sources: List<SourceEntity> = emptyList(),
 )
 
 data class DashboardState(
@@ -51,6 +53,12 @@ data class DashboardState(
     val spending: Double = 0.0,
     val categories: List<CategorySlice> = emptyList(),
     val categoryBars: List<CategoryBucket> = emptyList(),
+    val growth: List<GrowthBucket> = emptyList(),
+    val institutions: List<InstitutionSlice> = emptyList(),
+    val holdingsIncome: List<IncomeFromHoldings> = emptyList(),
+    val hasHoldingsIncome: Boolean = false,
+    val savingsRate: List<LinePoint> = emptyList(),
+    val lastMonth: LastMonthExpenses? = null,
     val missingFx: Set<String> = emptySet(),
     val hasData: Boolean = false,
     val hasFlows: Boolean = false,
@@ -118,6 +126,20 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
         })
     }
 
+    val classIsLiability = input.assetClasses.associate { it.id to it.isLiability }
+    val growth = growthBuckets(
+        valuator,
+        input.products.associate { it.id to (classIsLiability[it.assetClassId] == true) },
+        liabilityIds, flowItems, input.fx, start,
+        bucketEnds(start, today, Granularity.MONTH),
+    )
+    val institutions = institutionSlices(
+        valuator, input.sources,
+        input.products.map { Triple(it.id, it.sourceId, classIsLiability[it.assetClassId] == true) },
+        today,
+    )
+    val holdingsKinds = setOf(TxKind.DIVIDEND, TxKind.INTEREST, TxKind.FEE)
+
     val change = netNow - netStart
     return DashboardState(
         range = range,
@@ -132,6 +154,12 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
         spending = spending,
         categories = categories,
         categoryBars = categoryBars,
+        growth = growth,
+        institutions = institutions,
+        holdingsIncome = incomeFromHoldings(input.transactions, currencyOf, input.fx, flowStart, today),
+        hasHoldingsIncome = input.transactions.any { it.kind in holdingsKinds },
+        savingsRate = savingsRateTrend(flowItems, start, today, input.fx),
+        lastMonth = lastMonthExpenses(input.transactions, currencyOf, categoryMap, input.fx, today),
         missingFx = valuator.missingCurrencies.toSet(),
         hasData = input.snapshots.isNotEmpty() || input.transactions.isNotEmpty(),
         hasFlows = flowItems.isNotEmpty(),
