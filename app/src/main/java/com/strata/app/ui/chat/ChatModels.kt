@@ -2,6 +2,7 @@ package com.strata.app.ui.chat
 
 import com.strata.app.ai.ChangeSet
 import com.strata.app.ai.ProductPointer
+import com.strata.app.ai.SnapshotEdit
 import com.strata.app.data.db.AttachmentEntity
 import com.strata.app.data.db.MessageEntity
 import com.strata.app.data.db.ProductEntity
@@ -27,10 +28,20 @@ import java.time.LocalDate
 
 data class AttachmentChip(val name: String, val pages: Int)
 
-data class ProposalGroup(val title: String, val lines: List<ProposalLine>)
+/** ADD writes new rows; CORRECT and REMOVE change rows already recorded, and the card sets them apart. */
+enum class GroupKind { ADD, CORRECT, REMOVE }
+
+data class ProposalGroup(val title: String, val lines: List<ProposalLine>, val kind: GroupKind = GroupKind.ADD, val note: String? = null)
 enum class Tone { NEUTRAL, IN, OUT }
 
-data class ProposalLine(val primary: String, val secondary: String, val amount: String? = null, val tone: Tone = Tone.NEUTRAL)
+/** [previous] is the recorded value a correction replaces or a removal deletes, shown struck through. */
+data class ProposalLine(
+    val primary: String,
+    val secondary: String,
+    val amount: String? = null,
+    val tone: Tone = Tone.NEUTRAL,
+    val previous: String? = null,
+)
 
 data class ProposalUi(
     val messageId: Long,
@@ -41,6 +52,8 @@ data class ProposalUi(
     val groups: List<ProposalGroup>,
     /** Balance checks that failed; shown above the rows while the card is pending. */
     val warnings: List<String> = emptyList(),
+    /** Set when applying would change or remove rows already recorded; shown as a banner while pending. */
+    val rewrites: String? = null,
 )
 
 sealed interface ChatItem {
@@ -104,6 +117,8 @@ private val stepNames = mapOf(
     "stage_snapshots" to "Staged balances",
     "stage_transactions" to "Staged transactions",
     "link_transfer" to "Linked a transfer",
+    "edit_recorded_snapshots" to "Corrected recorded balances",
+    "delete_recorded_snapshots" to "Removed recorded balances",
     "sum_transactions" to "Added up transactions",
     "calculate" to "Calculated",
     "get_staged_changes" to "Reviewed the draft",
@@ -175,6 +190,31 @@ fun buildChatItems(messages: List<MessageEntity>, attachments: List<AttachmentEn
     return items
 }
 
+/** What a correction changes besides the value, which the row shows struck through: "moved from 29 Sep 2026 to 30 Sep 2026". */
+private fun editSummary(e: SnapshotEdit, currency: String): String {
+    val (old, new) = e.before to e.after
+    fun differs(a: String?, b: String?) = if (a == null || b == null) a != b else BigDecimal(a).compareTo(BigDecimal(b)) != 0
+    fun units(q: String?) = q?.let { MoneyFormat.quantity(BigDecimal(it)) } ?: "none"
+    fun price(p: String?) = p?.let { MoneyFormat.full(BigDecimal(it), currency) } ?: "none"
+    val newDate = MoneyFormat.date(LocalDate.parse(new.date))
+    return buildList {
+        add(if (old.date != new.date) "moved from ${MoneyFormat.date(LocalDate.parse(old.date))} to $newDate" else newDate)
+        if (differs(old.quantity, new.quantity)) add("units ${units(old.quantity)} → ${units(new.quantity)}")
+        if (differs(old.unitPrice, new.unitPrice)) add("price ${price(old.unitPrice)} → ${price(new.unitPrice)}")
+        if (old.note != new.note) add(if (new.note.isBlank()) "note cleared" else "note: ${new.note}")
+    }.joinToString("  ·  ")
+}
+
+private fun rewritesNotice(corrected: Int, removed: Int): String? {
+    if (corrected == 0 && removed == 0) return null
+    fun balances(n: Int) = if (n == 1) "1 balance" else "$n balances"
+    val what = listOfNotNull(
+        balances(corrected).takeIf { corrected > 0 }?.let { "overwrites $it" },
+        balances(removed).takeIf { removed > 0 }?.let { "deletes $it" },
+    ).joinToString(" and ")
+    return "Applying this card $what you already recorded. Undoing the import in Data puts them back."
+}
+
 private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): ProposalUi? {
     val changes = runCatching { json.decodeFromString(ChangeSet.serializer(), raw) }.getOrNull() ?: return null
     val products = lookup.products.associateBy { it.id }
@@ -192,7 +232,29 @@ private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): Pro
         if (changes.products.isNotEmpty()) add(ProposalGroup("New products", changes.products.map {
             ProposalLine(it.name, listOfNotNull(sources[it.sourceId]?.name, it.currency, it.identifier.ifBlank { null }).joinToString("  ·  "))
         }))
-        if (changes.snapshots.isNotEmpty()) add(ProposalGroup("Balances", changes.snapshots.map {
+        if (changes.snapshotEdits.isNotEmpty()) add(ProposalGroup(
+            "Corrections to recorded balances",
+            changes.snapshotEdits.map {
+                val (name, currency) = productName(ProductPointer(id = it.after.productId))
+                val valueChanged = BigDecimal(it.before.value).compareTo(BigDecimal(it.after.value)) != 0
+                ProposalLine(
+                    name, editSummary(it, currency), MoneyFormat.full(BigDecimal(it.after.value), currency),
+                    previous = MoneyFormat.full(BigDecimal(it.before.value), currency).takeIf { valueChanged },
+                )
+            },
+            GroupKind.CORRECT,
+            "Already in your ledger. Applying overwrites them.",
+        ))
+        if (changes.snapshotDeletions.isNotEmpty()) add(ProposalGroup(
+            "Recorded balances to remove",
+            changes.snapshotDeletions.map {
+                val (name, currency) = productName(ProductPointer(id = it.before.productId))
+                ProposalLine(name, MoneyFormat.date(LocalDate.parse(it.before.date)), previous = MoneyFormat.full(BigDecimal(it.before.value), currency))
+            },
+            GroupKind.REMOVE,
+            "Already in your ledger. Applying deletes them.",
+        ))
+        if (changes.snapshots.isNotEmpty()) add(ProposalGroup(if (changes.rewritesRecorded) "New balances" else "Balances", changes.snapshots.map {
             val (name, currency) = productName(it.product)
             ProposalLine(name, MoneyFormat.date(LocalDate.parse(it.date)), MoneyFormat.full(BigDecimal(it.value), currency))
         }))
@@ -238,5 +300,6 @@ private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): Pro
         importId = message.importId,
         groups = groups,
         warnings = warnings,
+        rewrites = rewritesNotice(changes.snapshotEdits.size, changes.snapshotDeletions.size),
     )
 }

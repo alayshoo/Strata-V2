@@ -86,7 +86,7 @@ object ToolSpecs {
         )
         add(
             tool(
-                "get_snapshots", "Balances recorded for one product.",
+                "get_snapshots", "Balances recorded for one product, with the ids edit_recorded_snapshots and delete_recorded_snapshots take.",
                 props(
                     "product_id" to prop("integer", "Product id."),
                     "from" to prop("string", "Start date, YYYY-MM-DD."),
@@ -201,6 +201,40 @@ object ToolSpecs {
         )
         add(
             tool(
+                "edit_recorded_snapshots",
+                "Stage corrections to balances already recorded, e.g. when the user spots a wrong value in a chart. " +
+                    "Get the ids from get_snapshots. In set, pass only the fields to change: date, value, quantity, unit_price, note; " +
+                    "null clears quantity, unit_price or note. A balance stays on its product; to move it, delete it and stage a new one. " +
+                    "Nothing changes until the user applies the card, which shows the recorded and the corrected values.",
+                props(
+                    "items" to arraySchema(
+                        props(
+                            "snapshot_id" to prop("integer", "Id of the recorded balance, from get_snapshots."),
+                            "set" to prop("object", "Fields to change, e.g. {\"value\": \"1520.37\"} or {\"date\": \"2026-09-30\"}."),
+                        ),
+                        listOf("snapshot_id", "set"),
+                        "Corrections to stage. If any is invalid, none is staged.",
+                    )
+                ),
+                listOf("items"),
+            )
+        )
+        add(
+            tool(
+                "delete_recorded_snapshots",
+                "Stage the removal of balances already recorded, e.g. a duplicate or one recorded on the wrong product. " +
+                    "Get the ids from get_snapshots. Nothing is removed until the user applies the card.",
+                props(
+                    "snapshot_ids" to buildJsonObject {
+                        put("type", "array")
+                        putJsonObject("items") { put("type", "integer") }
+                    }
+                ),
+                listOf("snapshot_ids"),
+            )
+        )
+        add(
+            tool(
                 "link_transfer", "Link two or more existing transactions as legs of one transfer or trade.",
                 props(
                     "transaction_ids" to buildJsonObject {
@@ -248,7 +282,7 @@ object ToolSpecs {
             tool(
                 "update_staged",
                 "Correct staged items in place by staged_id, leaving everything else as it is. In set, pass only the fields to change, " +
-                    "named as in the stage tool that created the item; null clears an optional field. Changing a transaction's kind " +
+                    "named as in the tool that staged the item; null clears an optional field. Changing a transaction's kind " +
                     "drops its spending category unless set also gives spending_category_id. A staged product's ref cannot change.",
                 props(
                     "items" to arraySchema(
@@ -325,6 +359,8 @@ class ToolExecutor(
         "stage_snapshots" -> "Staged balances"
         "stage_transactions" -> "Staged transactions"
         "link_transfer" -> "Staged a transfer link"
+        "edit_recorded_snapshots" -> "Staged balance corrections"
+        "delete_recorded_snapshots" -> "Staged balance removals"
         "sum_transactions" -> "Added up transactions"
         "calculate" -> "Calculated"
         "get_staged_changes" -> "Reviewed staged changes"
@@ -362,6 +398,9 @@ class ToolExecutor(
                         put("id", s.id); put("date", s.date.toString()); put("value", s.value.toPlainString())
                         s.quantity?.let { put("quantity", it.toPlainString()) }
                         s.unitPrice?.let { put("unit_price", it.toPlainString()) }
+                        if (s.note.isNotBlank()) put("note", s.note)
+                        staged.snapshotEdits.firstOrNull { it.snapshotId == s.id }?.let { put("staged_correction", it.id) }
+                        staged.snapshotDeletions.firstOrNull { it.snapshotId == s.id }?.let { put("staged_removal", it.id) }
                     }
                 }
             }
@@ -394,6 +433,8 @@ class ToolExecutor(
         "stage_product" -> stageProduct(args)
         "stage_snapshots" -> stageSnapshots(args)
         "stage_transactions" -> stageTransactions(args)
+        "edit_recorded_snapshots" -> editRecordedSnapshots(args)
+        "delete_recorded_snapshots" -> deleteRecordedSnapshots(args)
         "link_transfer" -> {
             val ids = args["transaction_ids"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.longOrNull }.orEmpty()
             requireLinkable(ids, "")
@@ -573,8 +614,16 @@ class ToolExecutor(
     /** Why [snapshot] can't be staged next to [others], or null when it can. */
     private suspend fun snapshotClash(snapshot: NewSnapshot, others: List<NewSnapshot>): String? {
         val duplicateStaged = others.any { it.product == snapshot.product && it.date == snapshot.date }
-        val duplicateStored = snapshot.product.id != null && db.ledgerDao().snapshotOn(snapshot.product.id, LocalDate.parse(snapshot.date)) != null
-        return if (duplicateStaged || duplicateStored) "a balance for that day already exists" else null
+        val productId = snapshot.product.id ?: return if (duplicateStaged) "a balance for that day already exists" else null
+        val stored = db.ledgerDao().snapshotOn(productId, LocalDate.parse(snapshot.date))
+        // A recorded balance staged for removal frees its day; one being corrected keeps it, as does one corrected onto it.
+        val duplicateStored = stored != null && staged.snapshotDeletions.none { it.snapshotId == stored.id }
+        val correctedOnto = staged.snapshotEdits.any { it.after.productId == productId && it.after.date == snapshot.date }
+        return when {
+            duplicateStaged || correctedOnto -> "a balance for that day already exists"
+            duplicateStored -> "balance ${stored!!.id} is already recorded for that day; correct it with edit_recorded_snapshots instead"
+            else -> null
+        }
     }
 
     private suspend fun parseTransaction(item: JsonObject, at: String, categories: Map<Long, SpendingCategoryEntity>): NewTransaction {
@@ -615,6 +664,95 @@ class ToolExecutor(
         ids.forEach { if (db.ledgerDao().transaction(it) == null) throw ToolError("${at}Transaction $it does not exist") }
     }
 
+    // ---------- Correcting balances already recorded ----------
+
+    private suspend fun editRecordedSnapshots(args: JsonObject): JsonObject {
+        val items = args["items"]?.jsonArray ?: throw ToolError("items is required")
+        if (items.isEmpty()) throw ToolError("items is empty")
+        val before = staged
+        val ids = try {
+            items.mapIndexed { i, element ->
+                val item = element.jsonObject
+                val snapshotId = item.long("snapshot_id") ?: throw ToolError("items[$i].snapshot_id is required")
+                val set = item["set"] as? JsonObject ?: throw ToolError("items[$i].set must be an object with the fields to change")
+                stageSnapshotEdit(snapshotId, set, "items[$i]")
+            }
+        } catch (e: Exception) {
+            staged = before
+            throw e
+        }
+        return stagedResult(ids.distinct(), emptyList())
+    }
+
+    /** Stages [set] on recorded balance [snapshotId], on top of a correction already staged for it. Returns its staged id. */
+    private suspend fun stageSnapshotEdit(snapshotId: Long, set: JsonObject, at: String): Int {
+        val row = db.ledgerDao().snapshot(snapshotId)
+            ?: throw ToolError("$at: balance $snapshotId does not exist. get_snapshots lists a product's balances with their ids.")
+        staged.snapshotDeletions.firstOrNull { it.snapshotId == snapshotId }?.let {
+            throw ToolError("$at: balance $snapshotId is staged for removal (staged_id ${it.id}); remove_staged that first to correct it instead")
+        }
+        val unknown = set.keys - EDITABLE_SNAPSHOT_FIELDS
+        if ("product_id" in unknown || "new_product_ref" in unknown) {
+            throw ToolError("$at: a balance can't move to another product; delete it with delete_recorded_snapshots and stage a new one there")
+        }
+        if (unknown.isNotEmpty()) throw ToolError("$at: can't set ${unknown.joinToString()}; a balance has ${EDITABLE_SNAPSHOT_FIELDS.joinToString()}")
+        val existing = staged.snapshotEdits.firstOrNull { it.snapshotId == snapshotId }
+        val recorded = row.recorded()
+        val base = existing?.after ?: recorded
+        val parsed = parseSnapshot(overlay(recordedArgs(base), set), at)
+        val after = RecordedSnapshot(row.productId, parsed.date, parsed.value, parsed.quantity, parsed.unitPrice, parsed.note)
+        if (after.sameAs(recorded)) {
+            val hint = existing?.let { "; remove_staged ${it.id} to drop the staged correction" }.orEmpty()
+            throw ToolError("$at: that leaves balance $snapshotId as it is recorded$hint")
+        }
+        if (after.date != recorded.date) {
+            val date = LocalDate.parse(after.date)
+            val other = db.ledgerDao().snapshotOn(row.productId, date)
+            if (other != null && other.id != snapshotId && staged.snapshotDeletions.none { it.snapshotId == other.id }) {
+                throw ToolError("$at: balance ${other.id} is already recorded on $date; correct or delete that one instead")
+            }
+            val stagedOnDay = staged.snapshots.any { it.product == ProductPointer(id = row.productId) && it.date == after.date } ||
+                staged.snapshotEdits.any { it.snapshotId != snapshotId && it.after.productId == row.productId && it.after.date == after.date }
+            if (stagedOnDay) throw ToolError("$at: another balance is staged for $date on that product")
+        }
+        val edit = SnapshotEdit(snapshotId, recorded, after, existing?.id ?: newId())
+        staged = staged.copy(
+            snapshotEdits = if (existing != null) staged.snapshotEdits.map { if (it.id == edit.id) edit else it } else staged.snapshotEdits + edit
+        )
+        return edit.id
+    }
+
+    private suspend fun deleteRecordedSnapshots(args: JsonObject): JsonObject {
+        val ids = args["snapshot_ids"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.longOrNull }.orEmpty().distinct()
+        if (ids.isEmpty()) throw ToolError("snapshot_ids is required")
+        val rows = ids.map {
+            db.ledgerDao().snapshot(it) ?: throw ToolError("Balance $it does not exist. get_snapshots lists a product's balances with their ids.")
+        }
+        // Removing a balance replaces a correction staged for it.
+        val replaced = staged.snapshotEdits.filter { it.snapshotId in ids }
+        val added = rows.filter { r -> staged.snapshotDeletions.none { it.snapshotId == r.id } }.map { SnapshotDeletion(it.id, it.recorded(), newId()) }
+        staged = staged.copy(snapshotEdits = staged.snapshotEdits - replaced.toSet(), snapshotDeletions = staged.snapshotDeletions + added)
+        val already = staged.snapshotDeletions.filter { it.snapshotId in ids && it !in added }
+        return buildJsonObject {
+            put("staged", added.size)
+            if (added.isNotEmpty()) putJsonArray("staged_ids") { added.forEach { add(it.id) } }
+            if (already.isNotEmpty()) putJsonArray("already_staged") { already.forEach { add(it.id) } }
+            if (replaced.isNotEmpty()) putJsonArray("replaced_corrections") { replaced.forEach { add(it.id) } }
+            checks()?.let { put("checks", it) }
+        }
+    }
+
+    private fun com.strata.app.data.db.SnapshotEntity.recorded() = RecordedSnapshot(
+        productId, date.toString(), value.toPlainString(), quantity?.toPlainString(), unitPrice?.toPlainString(), note,
+    )
+
+    /** Same balance, comparing decimals by value so "1520.3" and "1520.30" match. */
+    private fun RecordedSnapshot.sameAs(other: RecordedSnapshot): Boolean {
+        fun eq(a: String?, b: String?) = if (a == null || b == null) a == b else BigDecimal(a).compareTo(BigDecimal(b)) == 0
+        return productId == other.productId && date == other.date && eq(value, other.value) &&
+            eq(quantity, other.quantity) && eq(unitPrice, other.unitPrice) && note == other.note
+    }
+
     // ---------- Reviewing and correcting what is staged ----------
 
     private suspend fun stagedChanges(args: JsonObject): JsonObject {
@@ -628,18 +766,28 @@ class ToolExecutor(
         }
         val snapshots = staged.snapshots.filter { keep(it.product, it.date) }
         val transactions = staged.transactions.filter { keep(it.product, it.date) }
+        val edits = staged.snapshotEdits.filter { keep(ProductPointer(id = it.after.productId), it.after.date) || keep(ProductPointer(id = it.before.productId), it.before.date) }
+        val deletions = staged.snapshotDeletions.filter { keep(ProductPointer(id = it.before.productId), it.before.date) }
         return buildJsonObject {
-            putJsonObject("totals") {
-                put("products", staged.products.size); put("snapshots", staged.snapshots.size)
-                put("transactions", staged.transactions.size); put("links", staged.links.size)
+            putJsonObject("totals") { putTotals() }
+            if (pointer != null || from != null || to != null) {
+                put("shown", "${snapshots.size} balances, ${transactions.size} transactions, ${edits.size} corrections and ${deletions.size} removals match the filter")
             }
-            if (pointer != null || from != null || to != null) put("shown", "${snapshots.size} balances and ${transactions.size} transactions match the filter")
             putJsonArray("products") { staged.products.forEach { add(productArgs(it)) } }
             putJsonArray("snapshots") { snapshots.forEach { add(snapshotArgs(it)) } }
             putJsonArray("transactions") { transactions.forEach { add(transactionArgs(it)) } }
             putJsonArray("links") { staged.links.forEach { add(linkArgs(it)) } }
+            if (staged.snapshotEdits.isNotEmpty()) putJsonArray("recorded_snapshot_corrections") { edits.forEach { add(editArgs(it)) } }
+            if (staged.snapshotDeletions.isNotEmpty()) putJsonArray("recorded_snapshot_removals") { deletions.forEach { add(deletionArgs(it)) } }
             checks()?.let { put("checks", it) }
         }
+    }
+
+    private fun JsonObjectBuilder.putTotals() {
+        put("products", staged.products.size); put("snapshots", staged.snapshots.size)
+        put("transactions", staged.transactions.size); put("links", staged.links.size)
+        if (staged.snapshotEdits.isNotEmpty()) put("recorded_snapshot_corrections", staged.snapshotEdits.size)
+        if (staged.snapshotDeletions.isNotEmpty()) put("recorded_snapshot_removals", staged.snapshotDeletions.size)
     }
 
     private suspend fun updateStaged(args: JsonObject): JsonObject {
@@ -690,6 +838,13 @@ class ToolExecutor(
             staged = staged.copy(products = staged.products.map { if (it.id == id) updated else it })
             return
         }
+        staged.snapshotEdits.firstOrNull { it.id == id }?.let {
+            stageSnapshotEdit(it.snapshotId, set, at)
+            return
+        }
+        if (staged.snapshotDeletions.any { it.id == id }) {
+            throw ToolError("$at: a removal has nothing to change; remove_staged $id keeps the balance, then edit_recorded_snapshots corrects it")
+        }
         staged.links.firstOrNull { it.id == id }?.let {
             val ids = set["transaction_ids"]?.jsonArray?.mapNotNull { e -> (e as? JsonPrimitive)?.longOrNull }
                 ?: throw ToolError("$at: a link only has transaction_ids to change")
@@ -703,8 +858,7 @@ class ToolExecutor(
     private suspend fun removeStaged(args: JsonObject): JsonObject {
         val ids = args["staged_ids"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.longOrNull?.toInt() }.orEmpty().toSet()
         if (ids.isEmpty()) throw ToolError("staged_ids is required")
-        val known = staged.products.map { it.id } + staged.snapshots.map { it.id } + staged.transactions.map { it.id } + staged.links.map { it.id }
-        val unknown = ids - known.toSet()
+        val unknown = ids - staged.ids.toSet()
         if (unknown.isNotEmpty()) throw ToolError("Nothing staged has id ${unknown.joinToString()}. Call get_staged_changes for the current ids.")
         // Rows staged on a removed product would point at nothing.
         val refs = staged.products.filter { it.id in ids }.map { it.ref }.toSet()
@@ -717,14 +871,13 @@ class ToolExecutor(
             snapshots = staged.snapshots.filter { it.id !in gone },
             transactions = staged.transactions.filter { it.id !in gone },
             links = staged.links.filter { it.id !in gone },
+            snapshotEdits = staged.snapshotEdits.filter { it.id !in gone },
+            snapshotDeletions = staged.snapshotDeletions.filter { it.id !in gone },
         )
         return buildJsonObject {
             put("removed", ids.size)
             if (cascaded.isNotEmpty()) putJsonArray("also_removed_with_their_product") { cascaded.forEach { add(it) } }
-            putJsonObject("remaining") {
-                put("products", staged.products.size); put("snapshots", staged.snapshots.size)
-                put("transactions", staged.transactions.size); put("links", staged.links.size)
-            }
+            putJsonObject("remaining") { putTotals() }
             checks()?.let { put("checks", it) }
         }
     }
@@ -773,6 +926,22 @@ class ToolExecutor(
     private fun linkArgs(l: TransferLink) = buildJsonObject {
         put("staged_id", l.id)
         putJsonArray("transaction_ids") { l.transactionIds.forEach { add(it) } }
+    }
+
+    private fun recordedArgs(r: RecordedSnapshot) = buildJsonObject {
+        put("product_id", r.productId); put("date", r.date); put("value", r.value)
+        r.quantity?.let { put("quantity", it) }
+        r.unitPrice?.let { put("unit_price", it) }
+        if (r.note.isNotBlank()) put("note", r.note)
+    }
+
+    private fun editArgs(e: SnapshotEdit) = buildJsonObject {
+        put("staged_id", e.id); put("snapshot_id", e.snapshotId)
+        put("recorded", recordedArgs(e.before)); put("corrected", recordedArgs(e.after))
+    }
+
+    private fun deletionArgs(d: SnapshotDeletion) = buildJsonObject {
+        put("staged_id", d.id); put("snapshot_id", d.snapshotId); put("recorded", recordedArgs(d.before))
     }
 
     private suspend fun sumTransactions(args: JsonObject): JsonObject {
@@ -862,4 +1031,8 @@ class ToolExecutor(
     }
 
     private fun BigDecimal.money(): String = setScale(2, RoundingMode.HALF_UP).toPlainString()
+
+    private companion object {
+        val EDITABLE_SNAPSHOT_FIELDS = listOf("date", "value", "quantity", "unit_price", "note")
+    }
 }

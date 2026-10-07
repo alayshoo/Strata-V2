@@ -78,6 +78,9 @@ interface LedgerDao {
     )
     suspend fun snapshotsFor(productId: Long, from: LocalDate, to: LocalDate): List<SnapshotEntity>
 
+    @Query("SELECT * FROM snapshots WHERE id = :id")
+    suspend fun snapshot(id: Long): SnapshotEntity?
+
     @Query("SELECT * FROM snapshots WHERE productId = :productId AND date = :date")
     suspend fun snapshotOn(productId: Long, date: LocalDate): SnapshotEntity?
 
@@ -85,6 +88,7 @@ interface LedgerDao {
     suspend fun insertSnapshot(snapshot: SnapshotEntity): Long
 
     @Upsert suspend fun upsertSnapshot(snapshot: SnapshotEntity)
+    @Update suspend fun updateSnapshot(snapshot: SnapshotEntity)
     @Delete suspend fun deleteSnapshot(snapshot: SnapshotEntity)
 
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC")

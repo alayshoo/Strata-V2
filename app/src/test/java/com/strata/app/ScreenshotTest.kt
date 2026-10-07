@@ -15,8 +15,11 @@ import com.strata.app.ai.ChangeSet
 import com.strata.app.ai.NewSnapshot
 import com.strata.app.ai.NewTransaction
 import com.strata.app.ai.ProductPointer
+import com.strata.app.ai.RecordedSnapshot
 import com.strata.app.ai.RoundTrace
 import com.strata.app.ai.RunState
+import com.strata.app.ai.SnapshotDeletion
+import com.strata.app.ai.SnapshotEdit
 import com.strata.app.data.db.AttachmentEntity
 import com.strata.app.data.db.ChatEntity
 import com.strata.app.data.db.MessageEntity
@@ -160,6 +163,10 @@ class ScreenshotTest(private val dark: Boolean) {
         ConversationScreen(conversationUi(ProposalStatus.APPLIED), listOf("revolut_2026_09.csv"), {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, initialDraft = "And this one is my Revolut export")
     }
 
+    @Test fun conversationCorrection() = shoot("19-conversation-correction", tall = 1100) {
+        ConversationScreen(correctionUi(), emptyList(), {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+
     @Test fun holdings() = shoot("08-data-holdings", tall = 1300) {
         WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it) }
     }
@@ -222,6 +229,33 @@ class ScreenshotTest(private val dark: Boolean) {
 
     private fun callsWith(name: String, escapedArgs: String) =
         """[{"id":"b0","type":"function","function":{"name":"$name","arguments":"$escapedArgs"}}]"""
+
+    /** A card that corrects recorded balances rather than adding new ones. */
+    private fun correctionUi(): ConversationUi {
+        val changes = ChangeSet(
+            snapshotEdits = listOf(
+                SnapshotEdit(
+                    31, RecordedSnapshot(1, "2026-08-31", "43812.70", note = "Statement"),
+                    RecordedSnapshot(1, "2026-08-31", "4381.27", note = "Statement"), id = 1,
+                ),
+                SnapshotEdit(32, RecordedSnapshot(10, "2026-08-29", "655.10"), RecordedSnapshot(10, "2026-08-31", "655.10"), id = 2),
+            ),
+            snapshotDeletions = listOf(SnapshotDeletion(33, RecordedSnapshot(10, "2026-08-30", "655.10"), id = 3)),
+            nextId = 4,
+        )
+        val messages = listOf(
+            MessageEntity(1, 4, Role.USER, "The current account spikes to 43k in August, that's wrong. And the Visa has two balances at the end of August."),
+            MessageEntity(
+                2, 4, Role.ASSISTANT,
+                "The 31 August balance of the **current account** has an extra digit: €43,812.70 instead of €4,381.27, which matches its transactions. " +
+                    "The **Visa Gold** has the same balance on 29 and 30 August; I kept one, moved it to the statement date, and removed the other.",
+                proposalJson = Json.encodeToString(ChangeSet.serializer(), changes),
+                proposalStatus = ProposalStatus.PENDING,
+            ),
+        )
+        val items = buildChatItems(messages, emptyList(), Lookup(SampleData.products, SampleData.sources, SampleData.categories))
+        return ConversationUi("Fix August balances", items, model = "anthropic/claude-sonnet-5.5")
+    }
 
     private fun conversationUi(status: ProposalStatus = ProposalStatus.PENDING, running: Boolean = false): ConversationUi {
         val json = Json

@@ -3,12 +3,14 @@ package com.strata.app.data.repo
 import androidx.room.withTransaction
 import com.strata.app.ai.ChangeSet
 import com.strata.app.data.db.ImportEntity
+import com.strata.app.data.db.ImportRevert
 import com.strata.app.data.db.LedgerDao
 import com.strata.app.data.db.ProductEntity
 import com.strata.app.data.db.SnapshotEntity
 import com.strata.app.data.db.StrataDatabase
 import com.strata.app.data.db.TransactionEntity
 import com.strata.app.data.db.TxKind
+import kotlinx.serialization.json.Json
 import java.math.BigDecimal
 import java.time.LocalDate
 import java.util.UUID
@@ -17,6 +19,7 @@ data class ApplyResult(val importId: Long, val skippedDuplicates: Int)
 
 class LedgerRepository(private val db: StrataDatabase) {
     private val dao: LedgerDao = db.ledgerDao()
+    private val json = Json { ignoreUnknownKeys = true }
 
     val products = dao.observeProducts()
     val snapshots = dao.observeSnapshots()
@@ -46,11 +49,13 @@ class LedgerRepository(private val db: StrataDatabase) {
 
     suspend fun deleteTransaction(transaction: TransactionEntity) = dao.deleteTransaction(transaction)
 
-    /** Writes a reviewed change set atomically. Balances that already exist for that day are skipped. */
+    /**
+     * Writes a reviewed change set atomically. Balances that already exist for that day are skipped.
+     * Corrections to recorded balances keep what they replace on the import, so undo can put it back.
+     */
     suspend fun apply(changes: ChangeSet, chatId: Long?): ApplyResult = db.withTransaction {
-        val importId = dao.insertImport(
-            ImportEntity(chatId = chatId, fileNames = changes.fileNames.joinToString(", "), summary = changes.headline())
-        )
+        val entry = ImportEntity(chatId = chatId, fileNames = changes.fileNames.joinToString(", "), summary = changes.headline())
+        val importId = dao.insertImport(entry)
         val refs = HashMap<String, Long>()
         for (p in changes.products) {
             refs[p.ref] = dao.insertProduct(
@@ -66,6 +71,29 @@ class LedgerRepository(private val db: StrataDatabase) {
         }
         fun resolve(id: Long?, ref: String?): Long =
             id ?: refs[ref] ?: error("Unknown product reference $ref")
+
+        // Removals first, so a correction or a new balance can take a day a removed one held.
+        val deleted = changes.snapshotDeletions.mapNotNull { d -> dao.snapshot(d.snapshotId)?.also { dao.deleteSnapshot(it) } }
+        val edited = changes.snapshotEdits.mapNotNull { e ->
+            val row = dao.snapshot(e.snapshotId) ?: return@mapNotNull null
+            val date = LocalDate.parse(e.after.date)
+            val clash = dao.snapshotOn(row.productId, date)
+            if (clash != null && clash.id != row.id) error("A balance on $date was recorded after this card was made. Ask for the correction again.")
+            dao.updateSnapshot(
+                row.copy(
+                    date = date,
+                    value = BigDecimal(e.after.value),
+                    quantity = e.after.quantity?.let(::BigDecimal),
+                    unitPrice = e.after.unitPrice?.let(::BigDecimal),
+                    note = e.after.note,
+                )
+            )
+            row
+        }
+        if (deleted.isNotEmpty() || edited.isNotEmpty()) {
+            val revert = ImportRevert(editedSnapshots = edited, deletedSnapshots = deleted)
+            dao.updateImport(entry.copy(id = importId, revertJson = json.encodeToString(ImportRevert.serializer(), revert)))
+        }
 
         var skipped = 0
         for (s in changes.snapshots) {
@@ -119,11 +147,25 @@ class LedgerRepository(private val db: StrataDatabase) {
         ApplyResult(importId, skipped)
     }
 
-    /** Removes everything an import wrote. Products it created go too, unless other data now uses them. */
+    /**
+     * Removes everything an import wrote and puts back the recorded balances it corrected or removed.
+     * Products it created go too, unless other data now uses them.
+     */
     suspend fun undoImport(importId: Long) = db.withTransaction {
+        val revert = dao.importById(importId)?.revertJson?.let { runCatching { json.decodeFromString(ImportRevert.serializer(), it) }.getOrNull() }
         dao.deleteTransactionsOfImport(importId)
         dao.deleteSnapshotsOfImport(importId)
         dao.deleteOrphanProductsOfImport(importId)
+        if (revert != null) {
+            // A balance put back only takes its day if nothing else holds it now.
+            suspend fun dayFree(old: SnapshotEntity) = dao.snapshotOn(old.productId, old.date).let { it == null || it.id == old.id }
+            for (old in revert.editedSnapshots) {
+                if (dao.snapshot(old.id) != null && dayFree(old)) dao.updateSnapshot(old)
+            }
+            for (old in revert.deletedSnapshots) {
+                if (dao.product(old.productId) != null && dao.snapshot(old.id) == null && dayFree(old)) dao.insertSnapshot(old)
+            }
+        }
         dao.importById(importId)?.let { dao.updateImport(it.copy(undoneAt = System.currentTimeMillis())) }
         db.chatDao().markImportUndone(importId)
     }
