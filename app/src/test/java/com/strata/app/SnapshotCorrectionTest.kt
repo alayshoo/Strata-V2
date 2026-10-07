@@ -18,7 +18,9 @@ import com.strata.app.data.db.TransactionEntity
 import com.strata.app.data.db.TxKind
 import com.strata.app.data.repo.LedgerRepository
 import com.strata.app.domain.FxTable
+import com.strata.app.domain.MoneyFormat
 import com.strata.app.ui.chat.ChatItem
+import com.strata.app.ui.chat.GroupKind
 import com.strata.app.ui.chat.Lookup
 import com.strata.app.ui.chat.buildChatItems
 import kotlinx.coroutines.runBlocking
@@ -82,7 +84,7 @@ class SnapshotCorrectionTest {
         assertEquals("statement", edit.after.note)
         assertEquals("15000", value(11))
         assertTrue(tools.execute("get_snapshots", """{"product_id":1}""").contains("\"staged_correction\":1"))
-        assertEquals("1 balance correction", tools.staged.headline())
+        assertEquals("1 recorded balance corrected", tools.staged.headline())
     }
 
     @Test fun applyCorrectsAndUndoPutsItBack() = runBlocking {
@@ -153,6 +155,12 @@ class SnapshotCorrectionTest {
         assertTrue(tools.staged.isEmpty)
     }
 
+    @Test fun newBalancesNextToCorrectionsSayTheyAreNew() = runBlocking {
+        tools.execute("edit_recorded_snapshots", """{"items":[{"snapshot_id":11,"set":{"value":"1500"}}]}""")
+        tools.execute("stage_snapshots", """{"items":[{"product_id":1,"date":"2026-10-05","value":"1500"}]}""")
+        assertEquals("1 recorded balance corrected, 1 new balance", tools.staged.headline())
+    }
+
     @Test fun theCardShowsWhatChanges() = runBlocking {
         tools.execute("edit_recorded_snapshots", """{"items":[{"snapshot_id":11,"set":{"value":"1600"}}]}""")
         tools.execute("delete_recorded_snapshots", """{"snapshot_ids":[10]}""")
@@ -164,9 +172,15 @@ class SnapshotCorrectionTest {
         )
         val proposal = (buildChatItems(listOf(message), emptyList(), lookup).single() as ChatItem.Assistant).proposal!!
         val (corrected, removed) = proposal.groups
-        assertEquals("Corrected balances", corrected.title)
-        assertTrue(corrected.lines.single().secondary, corrected.lines.single().secondary.contains("was "))
-        assertEquals("Removed balances", removed.title)
+        assertEquals(GroupKind.CORRECT, corrected.kind)
+        assertEquals("Corrections to recorded balances", corrected.title)
+        // The recorded value is shown next to the corrected one.
+        fun eur(v: String) = MoneyFormat.full(BigDecimal(v), "EUR")
+        assertEquals(eur("15000") to eur("1600"), corrected.lines.single().let { it.previous to it.amount })
+        assertEquals(GroupKind.REMOVE, removed.kind)
+        assertEquals(eur("1000"), removed.lines.single().previous)
+        assertTrue(proposal.rewrites!!, proposal.rewrites!!.contains("overwrites 1 balance and deletes 1 balance"))
+        assertEquals("1 recorded balance corrected, 1 recorded balance removed", proposal.headline.lowercase())
         // With August removed, September is checked against all its transactions: 500, not 1600.
         assertTrue(proposal.warnings.toString(), proposal.warnings.single().contains("Current account"))
     }

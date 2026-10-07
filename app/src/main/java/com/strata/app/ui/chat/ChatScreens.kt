@@ -69,6 +69,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.strata.app.ai.RunState
@@ -367,8 +369,13 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
             // The later card holds the same rows, corrected; repeating them here would only confuse.
             if (p.status == ProposalStatus.SUPERSEDED) return@Column
             Spacer(Modifier.height(10.dp))
+            if (pending && p.rewrites != null) RewritesBanner(p.rewrites)
             if (p.warnings.isNotEmpty()) CheckWarnings(p.warnings)
             p.groups.forEach { group ->
+                if (group.kind != GroupKind.ADD) {
+                    RecordedChangesGroup(group)
+                    return@forEach
+                }
                 Text(group.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
                 val shown = if (expanded) group.lines else group.lines.take(3)
                 shown.forEach { line -> ProposalRow(line) }
@@ -383,14 +390,14 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
             }
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (p.groups.any { it.lines.size > 3 }) {
+                if (p.groups.any { it.kind == GroupKind.ADD && it.lines.size > 3 }) {
                     TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Show less" else "Show all") }
                 }
                 Spacer(Modifier.weight(1f))
                 when (p.status) {
                     ProposalStatus.PENDING -> {
                         TextButton(onClick = { onDiscard(p) }, enabled = !locked) { Text("Discard") }
-                        Button(onClick = { onApply(p) }, enabled = !locked) { Text("Apply") }
+                        Button(onClick = { onApply(p) }, enabled = !locked) { Text(if (p.rewrites != null) "Apply corrections" else "Apply") }
                     }
                     ProposalStatus.APPLIED -> if (p.importId != null) {
                         FilledTonalButton(onClick = { onUndo(p) }) {
@@ -403,6 +410,44 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                 }
             }
         }
+    }
+}
+
+/** Says up front that this card changes data already recorded, not only adds to it. */
+@Composable
+private fun RewritesBanner(text: String) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Edit, null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Changes your recorded data", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+        }
+    }
+}
+
+/** Corrections and removals of recorded rows: framed in the caution colour, and never folded behind "Show all". */
+@Composable
+private fun RecordedChangesGroup(group: ProposalGroup) {
+    val accent = MaterialTheme.colorScheme.secondary
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .clip(MaterialTheme.shapes.medium)
+            .border(1.5.dp, accent, MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (group.kind == GroupKind.REMOVE) Icons.Rounded.DeleteOutline else Icons.Rounded.Edit, null, tint = accent, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(group.title, style = MaterialTheme.typography.titleSmall, color = accent)
+        }
+        group.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)) }
+        group.lines.forEach { line -> ProposalRow(line, removal = group.kind == GroupKind.REMOVE) }
     }
 }
 
@@ -421,16 +466,37 @@ private fun CheckWarnings(warnings: List<String>) {
 }
 
 @Composable
-private fun ProposalRow(line: ProposalLine) {
+private fun ProposalRow(line: ProposalLine, removal: Boolean = false) {
     val colors = StrataTheme.colors
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(line.primary, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(line.secondary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(line.secondary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        line.amount?.let {
-            Spacer(Modifier.width(12.dp))
-            Text(it, style = Figures.medium, color = if (line.tone == Tone.IN) colors.gain else MaterialTheme.colorScheme.onSurface)
+        if (line.previous != null || line.amount != null) Spacer(Modifier.width(12.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            // The recorded value, struck through above what replaces it (or above "Removed").
+            line.previous?.let {
+                Text(
+                    it,
+                    style = (if (removal) Figures.medium else Figures.small).copy(textDecoration = TextDecoration.LineThrough),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (removal) {
+                Text("Removed", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+            }
+            line.amount?.let {
+                Text(
+                    it,
+                    style = if (line.previous != null) Figures.medium.copy(fontWeight = FontWeight.SemiBold) else Figures.medium,
+                    color = when {
+                        line.previous != null -> MaterialTheme.colorScheme.secondary
+                        line.tone == Tone.IN -> colors.gain
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                )
+            }
         }
     }
 }

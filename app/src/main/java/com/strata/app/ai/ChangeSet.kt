@@ -43,13 +43,18 @@ data class ChangeSet(
         )
     }
 
+    /** True when applying changes or removes rows already recorded. */
+    val rewritesRecorded: Boolean get() = snapshotEdits.isNotEmpty() || snapshotDeletions.isNotEmpty()
+
     fun headline(): String = buildList {
-        if (snapshots.isNotEmpty()) add(plural(snapshots.size, "balance", "balances"))
+        // Changes to recorded data lead, and new balances say they are new, so neither is mistaken for the other.
+        if (snapshotEdits.isNotEmpty()) add(plural(snapshotEdits.size, "recorded balance corrected", "recorded balances corrected"))
+        if (snapshotDeletions.isNotEmpty()) add(plural(snapshotDeletions.size, "recorded balance removed", "recorded balances removed"))
+        val fresh = if (rewritesRecorded) "new " else ""
+        if (snapshots.isNotEmpty()) add(plural(snapshots.size, "${fresh}balance", "${fresh}balances"))
         if (transactions.isNotEmpty()) add(plural(transactions.size, "transaction", "transactions"))
         if (products.isNotEmpty()) add(plural(products.size, "new product", "new products"))
         if (links.isNotEmpty()) add(plural(links.size, "transfer link", "transfer links"))
-        if (snapshotEdits.isNotEmpty()) add(plural(snapshotEdits.size, "balance correction", "balance corrections"))
-        if (snapshotDeletions.isNotEmpty()) add(plural(snapshotDeletions.size, "balance removed", "balances removed"))
     }.joinToString(", ")
 
     private fun plural(n: Int, one: String, many: String) = "$n ${if (n == 1) one else many}"
