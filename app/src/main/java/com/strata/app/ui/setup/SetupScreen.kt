@@ -91,6 +91,7 @@ fun SetupScreen(
     onLoadModels: () -> Unit,
     onPrivateOnly: (Boolean) -> Unit,
     onTest: () -> Unit,
+    onSaveNote: (String) -> Unit,
     onExport: (CharArray) -> Unit,
     onRestore: (CharArray) -> Unit,
     modifier: Modifier = Modifier,
@@ -100,6 +101,7 @@ fun SetupScreen(
     var editClass by remember { mutableStateOf<AssetClassEntity?>(null) }
     var editCategory by remember { mutableStateOf<SpendingCategoryEntity?>(null) }
     var keyDialog by remember { mutableStateOf(false) }
+    var noteSheet by remember { mutableStateOf(false) }
     var modelSheet by remember { mutableStateOf(false) }
     var passphraseFor by remember { mutableStateOf<String?>(null) }
 
@@ -153,7 +155,12 @@ fun SetupScreen(
             }
         }
 
-        item { AiPanel(ai, onEditKey = { keyDialog = true }, onPickModel = { onLoadModels(); modelSheet = true }, onPrivateOnly = onPrivateOnly, onTest = onTest) }
+        item {
+            AiPanel(
+                ai, onEditKey = { keyDialog = true }, onPickModel = { onLoadModels(); modelSheet = true },
+                onEditNote = { noteSheet = true }, onPrivateOnly = onPrivateOnly, onTest = onTest,
+            )
+        }
 
         item {
             Panel(title = "Privacy and backup") {
@@ -183,6 +190,7 @@ fun SetupScreen(
         CategoryEditor(c, onDismiss = { editCategory = null }, onSave = { onSaveCategory(it); editCategory = null }, onDelete = if (c.id != 0L) ({ onDeleteCategory(c); editCategory = null }) else null)
     }
     if (keyDialog) KeyDialog(onDismiss = { keyDialog = false }, onSave = { onSaveKey(it); keyDialog = false })
+    if (noteSheet) NoteEditor(ai.note, onDismiss = { noteSheet = false }, onSave = { onSaveNote(it); noteSheet = false })
     if (modelSheet) ModelSheet(ai, onDismiss = { modelSheet = false }, onPick = { onPickModel(it); modelSheet = false })
     passphraseFor?.let { mode ->
         PassphraseDialog(
@@ -246,11 +254,25 @@ private fun InfoLine(icon: ImageVector, title: String, body: String) {
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AiPanel(ai: AiSettingsUi, onEditKey: () -> Unit, onPickModel: () -> Unit, onPrivateOnly: (Boolean) -> Unit, onTest: () -> Unit) {
+private fun AiPanel(
+    ai: AiSettingsUi,
+    onEditKey: () -> Unit,
+    onPickModel: () -> Unit,
+    onEditNote: () -> Unit,
+    onPrivateOnly: (Boolean) -> Unit,
+    onTest: () -> Unit,
+) {
     Panel(title = "Assistant") {
         SettingRow("OpenRouter key", ai.keyTail?.let { "Saved, ending in $it" } ?: "Not set", if (ai.keyTail == null) "Add" else "Replace", onEditKey)
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(vertical = 4.dp))
         SettingRow("Model", ai.model, "Change", onPickModel)
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(vertical = 4.dp))
+        SettingRow(
+            "Notes for the assistant",
+            ai.note.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: "How your accounts work, in your words",
+            if (ai.note.isBlank()) "Write" else "Edit",
+            onEditNote,
+        )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(vertical = 4.dp))
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -383,6 +405,38 @@ fun CategoryEditor(initial: SpendingCategoryEntity, onDismiss: () -> Unit, onSav
             }
         }
         ColorPicker(color) { color = it }
+    }
+}
+
+@Composable
+private fun NoteEditor(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var note by remember { mutableStateOf(initial) }
+    EditorSheet(
+        "Notes for the assistant", onDismiss,
+        actions = {
+            if (initial.isNotBlank()) TextButton(onClick = { onSave("") }) { Text("Clear", color = MaterialTheme.colorScheme.error) }
+            Button(onClick = { onSave(note) }) { Text("Save") }
+        },
+    ) {
+        Text(
+            "Sent with every conversation, after Strata's own instructions. Describe how your money is set up and how you want things recorded.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        androidx.compose.material3.OutlinedTextField(
+            value = note,
+            onValueChange = { note = it.take(com.strata.app.data.repo.SettingsRepository.MAX_NOTE_LENGTH) },
+            placeholder = {
+                Text(
+                    "For example: transfers in my own name are between my own accounts. My salary arrives at my main bank around the 24th. " +
+                        "My broker lists each savings-plan purchase separately; record them as trades into the matching ETF."
+                )
+            },
+            minLines = 8,
+            shape = MaterialTheme.shapes.small,
+            supportingText = { Text("${note.length} / ${com.strata.app.data.repo.SettingsRepository.MAX_NOTE_LENGTH}") },
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

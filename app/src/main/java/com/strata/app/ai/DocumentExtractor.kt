@@ -62,7 +62,8 @@ class DocumentExtractor(private val context: Context) {
         if (bytes.size > MAX_BYTES) throw DocumentException("$name is larger than 20 MB.")
 
         when {
-            mime == "application/pdf" || name.endsWith(".pdf", ignoreCase = true) -> pdf(name, bytes)
+            // Some apps share PDFs without a .pdf name or with a generic type, so check the bytes too.
+            mime == "application/pdf" || name.endsWith(".pdf", ignoreCase = true) || isPdf(bytes) -> pdf(name, bytes)
             mime.startsWith("image/") -> PreparedAttachment(
                 name, mime, "", 1,
                 images = listOf("data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)),
@@ -159,11 +160,16 @@ class DocumentExtractor(private val context: Context) {
         }
     }
 
+    private fun isPdf(bytes: ByteArray) =
+        bytes.size > 4 && bytes[0] == '%'.code.toByte() && bytes[1] == 'P'.code.toByte() &&
+            bytes[2] == 'D'.code.toByte() && bytes[3] == 'F'.code.toByte()
+
     private fun guessMime(name: String) = when (name.substringAfterLast('.', "").lowercase()) {
         "csv" -> "text/csv"
         "pdf" -> "application/pdf"
         "png" -> "image/png"
         "jpg", "jpeg" -> "image/jpeg"
+        "webp" -> "image/webp"
         else -> "text/plain"
     }
 

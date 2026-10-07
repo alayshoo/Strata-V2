@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Strata</string>
+    <string name="share_label">Add to Strata</string>
 </resources>

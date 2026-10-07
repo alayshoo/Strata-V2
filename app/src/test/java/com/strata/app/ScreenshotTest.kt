@@ -178,7 +178,7 @@ class ScreenshotTest(private val dark: Boolean) {
             SetupScreen(
                 SetupLists(SampleData.sources, SampleData.assetClasses, SampleData.categories),
                 AiSettingsUi(keyTail = "9f3a", model = "anthropic/claude-sonnet-5.5", testResult = "Connected. Used $3.42 of $25.00.", testOk = true),
-                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, contentPadding = it,
+                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, contentPadding = it,
             )
         }
     }

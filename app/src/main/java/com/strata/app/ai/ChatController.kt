@@ -4,6 +4,7 @@ import android.net.Uri
 import com.strata.app.data.db.ProposalStatus
 import com.strata.app.data.repo.ChatRepository
 import com.strata.app.data.repo.LedgerRepository
+import com.strata.app.share.ShareInbox
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -38,6 +39,7 @@ class ChatController(
     private val documents: () -> DocumentExtractor,
     private val chats: ChatRepository,
     private val ledger: LedgerRepository,
+    private val shareInbox: ShareInbox,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
@@ -53,7 +55,12 @@ class ChatController(
         set(chatId, RunState(progress = if (uris.isEmpty()) "Starting" else "Reading your files", since = startedAt, startedAt = startedAt))
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val prepared = uris.map { documents().prepare(it) }
+                val prepared = try {
+                    uris.map { documents().prepare(it) }
+                } finally {
+                    // Copies of shared files are only needed until they have been read.
+                    uris.forEach(shareInbox::release)
+                }
                 agent.send(chatId, text, prepared) { p ->
                     set(chatId, RunState(progress = p.label, round = p.round, since = p.since, startedAt = startedAt))
                 }

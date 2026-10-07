@@ -41,6 +41,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.strata.app.Session
+import com.strata.app.share.ShareInbox
 import com.strata.app.ui.chat.ChatListScreen
 import com.strata.app.ui.chat.ChatListViewModel
 import com.strata.app.ui.chat.ConversationScreen
@@ -84,8 +85,16 @@ fun StrataNavigationBar(current: String?, onSelect: (TopDestination) -> Unit) {
 }
 
 @Composable
-fun AppRoot(session: Session) {
+fun AppRoot(session: Session, shareInbox: ShareInbox) {
     val nav = rememberNavController()
+    val shared by shareInbox.pending.collectAsStateWithLifecycle()
+    // A document shared from another app starts a new conversation with it attached.
+    LaunchedEffect(shared) {
+        val bundle = shareInbox.take() ?: return@LaunchedEffect
+        val chatId = session.chats.newChat()
+        session.drafts[chatId] = bundle
+        nav.navigate("chat/$chatId") { launchSingleTop = true }
+    }
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
     val snackbar = remember { SnackbarHostState() }
@@ -189,6 +198,7 @@ private fun ConversationRoute(session: Session, chatId: Long, onBack: () -> Unit
         onOpenSetup = onOpenSetup,
         onBack = onBack,
         onStop = vm::stop,
+        initialDraft = vm.draftText,
     )
 }
 
@@ -229,6 +239,7 @@ private fun SetupRoute(session: Session, snackbar: SnackbarHostState, padding: P
         onLoadModels = { vm.loadModels() },
         onPrivateOnly = { vm.setPrivateOnly(it) },
         onTest = { vm.testConnection() },
+        onSaveNote = { vm.saveNote(it) },
         onExport = { passphrase = it; exportLauncher.launch("strata-backup-${LocalDate.now()}.strata") },
         onRestore = { passphrase = it; restoreLauncher.launch(arrayOf("*/*")) },
         contentPadding = padding,

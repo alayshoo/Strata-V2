@@ -27,8 +27,13 @@ class ChatListViewModel(private val session: Session) : ViewModel() {
 class ConversationViewModel(private val session: Session, private val chatId: Long) : ViewModel() {
     data class PendingFile(val uri: Uri, val name: String)
 
-    private val _pending = MutableStateFlow<List<PendingFile>>(emptyList())
+    private val draft = session.drafts.remove(chatId)
+
+    private val _pending = MutableStateFlow(draft?.files.orEmpty().map { PendingFile(it.uri, it.name) })
     val pending: StateFlow<List<PendingFile>> = _pending
+
+    /** Text that came with a share, to prefill the composer. */
+    val draftText: String = draft?.text.orEmpty()
 
     private val lookup = combine(
         session.ledger.products, session.setup.sources, session.setup.spendingCategories,

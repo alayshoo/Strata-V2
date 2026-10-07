@@ -9,21 +9,28 @@ class SettingsRepository(private val dao: SettingsDao) {
     val apiKey = dao.observe(KEY_API)
     val model = dao.observe(KEY_MODEL).map { it ?: DEFAULT_MODEL }
     val privateProvidersOnly = dao.observe(KEY_PRIVATE_ONLY).map { it != "false" }
+    val userNote = dao.observe(KEY_NOTE).map { it.orEmpty() }
 
     suspend fun apiKey(): String? = dao.get(KEY_API)
     suspend fun model(): String = dao.get(KEY_MODEL) ?: DEFAULT_MODEL
     suspend fun privateProvidersOnly(): Boolean = dao.get(KEY_PRIVATE_ONLY) != "false"
+    suspend fun userNote(): String = dao.get(KEY_NOTE).orEmpty()
 
     suspend fun setApiKey(value: String) =
         if (value.isBlank()) dao.remove(KEY_API) else dao.put(SettingEntity(KEY_API, value.trim()))
 
     suspend fun setModel(value: String) = dao.put(SettingEntity(KEY_MODEL, value.trim()))
+    suspend fun setUserNote(value: String) =
+        if (value.isBlank()) dao.remove(KEY_NOTE) else dao.put(SettingEntity(KEY_NOTE, value.trim().take(MAX_NOTE_LENGTH)))
+
     suspend fun setPrivateProvidersOnly(value: Boolean) = dao.put(SettingEntity(KEY_PRIVATE_ONLY, value.toString()))
 
     companion object {
         private const val KEY_API = "openrouter.apiKey"
         private const val KEY_MODEL = "openrouter.model"
         private const val KEY_PRIVATE_ONLY = "openrouter.privateOnly"
+        private const val KEY_NOTE = "assistant.userNote"
+        const val MAX_NOTE_LENGTH = 6_000
         const val DEFAULT_MODEL = "anthropic/claude-sonnet-5.5"
     }
 }

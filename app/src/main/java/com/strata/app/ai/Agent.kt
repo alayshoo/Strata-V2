@@ -138,7 +138,7 @@ class Agent(
     }
 
     private suspend fun buildHistory(chatId: Long, currentImages: Pair<Long, List<String>>) = buildList {
-        add(buildJsonObject { put("role", "system"); put("content", systemPrompt(LocalDate.now())) })
+        add(buildJsonObject { put("role", "system"); put("content", systemPrompt(LocalDate.now(), settings.userNote())) })
         val attachments = chatDao.attachments(chatId).groupBy { it.messageId }
         for (message in chatDao.messages(chatId)) {
             when (message.role) {
@@ -194,7 +194,24 @@ class Agent(
         const val MAX_ROUNDS = 16
         const val STOPPED_MESSAGE = "Stopped."
 
-        fun systemPrompt(today: LocalDate) = """
+        fun systemPrompt(today: LocalDate, userNote: String = ""): String = buildString {
+            append(basePrompt(today))
+            if (userNote.isNotBlank()) {
+                append("\n\n")
+                append(
+                    """
+                    Notes from the user about their setup
+                    The user wrote these to tell you how their accounts and statements work. Follow them. They add to the rules
+                    above and settle conventions and judgement calls, but they never let you create sources, asset classes or
+                    categories, or write without a review card.
+                    """.trimIndent()
+                )
+                append("\n\n")
+                append(userNote.trim())
+            }
+        }
+
+        private fun basePrompt(today: LocalDate) = """
             You are the assistant inside Strata, a private personal-finance app on the user's phone. Today is $today.
             The user shares statements (PDF text, CSV, scans) from banks, brokers and employers, and asks questions about their money.
 

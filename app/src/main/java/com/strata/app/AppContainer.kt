@@ -13,14 +13,17 @@ import com.strata.app.data.repo.LedgerRepository
 import com.strata.app.data.repo.SettingsRepository
 import com.strata.app.data.repo.SetupRepository
 import com.strata.app.data.security.KeyVault
+import com.strata.app.share.SharedBundle
+import com.strata.app.share.ShareInbox
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** Everything that needs the decrypted database. Exists only after a successful unlock. */
-class Session(context: Context, val db: StrataDatabase, http: OkHttpClient) {
+class Session(context: Context, val db: StrataDatabase, http: OkHttpClient, shareInbox: ShareInbox) {
     val setup = SetupRepository(db.setupDao())
     val ledger = LedgerRepository(db)
     val settings = SettingsRepository(db.settingsDao())
@@ -30,11 +33,15 @@ class Session(context: Context, val db: StrataDatabase, http: OkHttpClient) {
     val agent = Agent(db, openRouter, settings) { fx.table.first() }
     val documents by lazy { DocumentExtractor(context) }
     val backup = BackupManager(db, context.contentResolver)
-    val chatController = ChatController(agent, { documents }, chats, ledger)
+    val chatController = ChatController(agent, { documents }, chats, ledger, shareInbox)
+
+    /** Shared files waiting for the conversation that was opened for them. */
+    val drafts = ConcurrentHashMap<Long, SharedBundle>()
 }
 
 class AppContainer(private val context: Context) {
     val vault by lazy { KeyVault(context) }
+    val shareInbox = ShareInbox(context)
 
     val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -60,7 +67,7 @@ class AppContainer(private val context: Context) {
 
     fun unlock(passphrase: ByteArray) {
         if (_session.value != null) return
-        _session.value = Session(context, StrataDatabase.open(context, passphrase), http)
+        _session.value = Session(context, StrataDatabase.open(context, passphrase), http, shareInbox)
     }
 
     private companion object {

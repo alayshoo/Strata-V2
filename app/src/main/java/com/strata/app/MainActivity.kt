@@ -1,5 +1,6 @@
 package com.strata.app
 
+import android.content.Intent
 import android.os.Bundle
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.view.WindowManager
@@ -14,6 +15,8 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.strata.app.data.db.StrataDatabase
 import com.strata.app.ui.AppRoot
 import com.strata.app.ui.lock.LockScreen
@@ -40,12 +43,25 @@ class MainActivity : FragmentActivity() {
                 when {
                     current == null -> LockScreen(lock, onUnlock = ::unlock, onReset = ::reset)
                     relocked -> LockScreen(LockUi(firstRun = false, relock = true), onUnlock = ::confirmPresence, onReset = {})
-                    else -> AppRoot(current)
+                    else -> AppRoot(current, container.shareInbox)
                 }
             }
         }
+        if (savedInstanceState == null) receiveShare(intent)
+        container.shareInbox.clearStale()
         // Survive rotation and theme changes without asking again.
         if (!lock.firstRun && container.session.value == null) unlock()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        receiveShare(intent)
+    }
+
+    /** Copies shared files now; the chat opens once the ledger is unlocked. */
+    private fun receiveShare(intent: Intent?) {
+        intent ?: return
+        lifecycleScope.launch { container.shareInbox.accept(intent) }
     }
 
     private fun unlock() {

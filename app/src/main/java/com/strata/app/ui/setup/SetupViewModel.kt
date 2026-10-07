@@ -26,6 +26,7 @@ data class AiSettingsUi(
     val keyTail: String? = null,
     val model: String = "",
     val privateOnly: Boolean = true,
+    val note: String = "",
     val testing: Boolean = false,
     val testResult: String? = null,
     val testOk: Boolean = false,
@@ -40,8 +41,10 @@ class SetupViewModel(private val session: Session) : ViewModel() {
 
     private val transient = MutableStateFlow(AiSettingsUi())
 
-    val ai: StateFlow<AiSettingsUi> = combine(session.settings.apiKey, session.settings.model, session.settings.privateProvidersOnly, transient) { key, model, priv, t ->
-        t.copy(keyTail = key?.takeLast(4), model = model, privateOnly = priv)
+    val ai: StateFlow<AiSettingsUi> = combine(
+        session.settings.apiKey, session.settings.model, session.settings.privateProvidersOnly, session.settings.userNote, transient,
+    ) { key, model, priv, note, t ->
+        t.copy(keyTail = key?.takeLast(4), model = model, privateOnly = priv, note = note)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettingsUi())
 
     private val _notice = MutableStateFlow<String?>(null)
@@ -62,6 +65,7 @@ class SetupViewModel(private val session: Session) : ViewModel() {
         transient.update { it.copy(testResult = null) }
     }
 
+    fun saveNote(note: String) = launchCatching { session.settings.setUserNote(note) }
     fun setModel(id: String) = launchCatching { session.settings.setModel(id) }
     fun setPrivateOnly(value: Boolean) = launchCatching { session.settings.setPrivateProvidersOnly(value) }
 
