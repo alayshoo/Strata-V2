@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -17,7 +18,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.TrendingDown
+import androidx.compose.material.icons.automirrored.rounded.TrendingUp
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Inventory2
@@ -50,6 +54,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.strata.app.ai.Reconcile
@@ -58,16 +63,25 @@ import com.strata.app.data.db.ProductEntity
 import com.strata.app.data.db.SnapshotEntity
 import com.strata.app.data.db.TransactionEntity
 import com.strata.app.data.db.TxKind
+import com.strata.app.data.db.SourceEntity
 import com.strata.app.domain.LinePoint
 import com.strata.app.domain.MoneyFormat
+import com.strata.app.domain.TimeRange
+import com.strata.app.ui.components.BarSegment
 import com.strata.app.ui.components.EmptyState
 import com.strata.app.ui.components.LineChart
 import com.strata.app.ui.components.Monogram
+import com.strata.app.ui.components.Panel
+import com.strata.app.ui.components.RangeSelector
 import com.strata.app.ui.components.ScreenTitle
+import com.strata.app.ui.components.StackBucket
+import com.strata.app.ui.components.StackedBarChart
 import com.strata.app.ui.components.Swatch
+import com.strata.app.ui.dashboard.rangePhrase
 import com.strata.app.ui.theme.Figures
 import com.strata.app.ui.theme.StrataTheme
 import com.strata.app.ui.theme.seriesColor
+import java.math.BigDecimal
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -79,6 +93,7 @@ enum class ExplorerTab(val label: String) { HOLDINGS("Holdings"), TRANSACTIONS("
 fun ExplorerScreen(
     data: ExplorerData,
     onOpenProduct: (Long) -> Unit,
+    onOpenSource: (Long) -> Unit,
     onUndoImport: (ImportEntity) -> Unit,
     onSaveProduct: (ProductEntity) -> Unit,
     onSaveTransaction: (TransactionEntity) -> Unit,
@@ -86,9 +101,11 @@ fun ExplorerScreen(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(),
     initialTab: ExplorerTab = ExplorerTab.HOLDINGS,
+    initialFilter: TxFilter = TxFilter.ALL,
 ) {
     var tab by rememberSaveable { mutableStateOf(initialTab) }
-    var filter by rememberSaveable { mutableStateOf(TxFilter.ALL) }
+    var filter by rememberSaveable { mutableStateOf(initialFilter) }
+    var categoryId by rememberSaveable { mutableStateOf<Long?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
     var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
     var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
@@ -125,7 +142,7 @@ fun ExplorerScreen(
                 }
             }
             when (tab) {
-                ExplorerTab.HOLDINGS -> holdingsItems(data, onOpenProduct)
+                ExplorerTab.HOLDINGS -> holdingsItems(data, onOpenProduct, onOpenSource)
                 ExplorerTab.TRANSACTIONS -> {
                     item {
                         OutlinedTextField(
@@ -143,7 +160,7 @@ fun ExplorerScreen(
                             items(TxFilter.entries) { f ->
                                 FilterChip(
                                     selected = filter == f,
-                                    onClick = { filter = f },
+                                    onClick = { if (filter != f) { filter = f; categoryId = null } },
                                     label = { Text(f.label) },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -152,7 +169,13 @@ fun ExplorerScreen(
                             }
                         }
                     }
-                    transactionItems(transactionRows(data, filter, query)) { editingTransaction = it }
+                    filter.categories?.let { kind ->
+                        val categories = data.categories.filter { it.kind == kind }
+                        if (categories.isNotEmpty()) item(key = "categories") {
+                            CategoryChips(categories, categoryId) { categoryId = it }
+                        }
+                    }
+                    transactionItems(transactionRows(data, filter, query, categoryId)) { editingTransaction = it }
                 }
                 ExplorerTab.IMPORTS -> importItems(data.imports, onUndoImport)
             }
@@ -191,7 +214,27 @@ fun ExplorerScreen(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.holdingsItems(data: ExplorerData, onOpenProduct: (Long) -> Unit) {
+/** Narrows Spending or Income to one category. Tapping the selected chip again clears it. */
+@Composable
+private fun CategoryChips(categories: List<com.strata.app.data.db.SpendingCategoryEntity>, selected: Long?, onSelect: (Long?) -> Unit) {
+    val options = categories.map { Triple(it.id, it.name, seriesColor(it.colorKey)) } +
+        Triple(UNCATEGORISED, "Uncategorised", MaterialTheme.colorScheme.outline)
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(options, key = { it.first }) { (id, name, color) ->
+            FilterChip(
+                selected = selected == id,
+                onClick = { onSelect(if (selected == id) null else id) },
+                label = { Text(name) },
+                leadingIcon = { Swatch(color, 8.dp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                ),
+            )
+        }
+    }
+}
+
+private fun androidx.compose.foundation.lazy.LazyListScope.holdingsItems(data: ExplorerData, onOpenProduct: (Long) -> Unit, onOpenSource: (Long) -> Unit) {
     val groups = holdings(data)
     if (groups.isEmpty()) {
         item {
@@ -205,12 +248,20 @@ private fun androidx.compose.foundation.lazy.LazyListScope.holdingsItems(data: E
     }
     groups.forEach { group ->
         item(key = "s${group.source.id}") {
-            Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 4.dp, start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(group.source.name, style = MaterialTheme.typography.titleLarge)
-                    Text(group.source.type.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Surface(
+                onClick = { onOpenSource(group.source.id) },
+                color = Color.Transparent,
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            ) {
+                Row(Modifier.padding(top = 8.dp, bottom = 4.dp, start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(group.source.name, style = MaterialTheme.typography.titleLarge)
+                        Text(group.source.type.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(MoneyFormat.whole(group.totalEur), style = Figures.medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(Icons.Rounded.ChevronRight, "Open ${group.source.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text(MoneyFormat.whole(group.totalEur), style = Figures.medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (group.products.isEmpty()) {
@@ -315,6 +366,176 @@ private fun androidx.compose.foundation.lazy.LazyListScope.importItems(imports: 
                 else Text("Undone", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(end = 8.dp))
             }
         }
+    }
+}
+
+// ---------- Institution detail ----------
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun SourceDetailScreen(
+    sourceId: Long,
+    data: ExplorerData,
+    onBack: () -> Unit,
+    onOpenProduct: (Long) -> Unit,
+    onSaveProduct: (ProductEntity) -> Unit,
+    onSaveTransaction: (TransactionEntity) -> Unit,
+    onDeleteTransaction: (TransactionEntity) -> Unit,
+    modifier: Modifier = Modifier,
+    initialRange: TimeRange = TimeRange.ALL,
+    today: java.time.LocalDate = java.time.LocalDate.now(),
+) {
+    val source = data.sources.firstOrNull { it.id == sourceId }
+    var range by rememberSaveable { mutableStateOf(initialRange) }
+    var showTransactions by rememberSaveable { mutableStateOf(false) }
+    var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
+    var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
+    val products = holdings(data).firstOrNull { it.source.id == sourceId }?.products.orEmpty()
+    val productIds = products.map { it.product.id }.toSet()
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = {},
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+            )
+        },
+        floatingActionButton = {
+            if (source != null && data.assetClasses.isNotEmpty() && (!showTransactions || products.isNotEmpty())) ExtendedFloatingActionButton(
+                onClick = {
+                    if (showTransactions) editingTransaction = TransactionEntity(
+                        productId = products.first().product.id, date = java.time.LocalDate.now(),
+                        amount = BigDecimal.ZERO, description = "", kind = TxKind.EXPENSE,
+                    )
+                    else editingProduct = ProductEntity(sourceId = sourceId, assetClassId = data.assetClasses.first().id, name = "", currency = "EUR")
+                },
+                icon = { Icon(Icons.Rounded.Add, null) },
+                text = { Text(if (showTransactions) "Transaction" else "Product") },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            )
+        },
+    ) { padding ->
+        if (source == null) {
+            Box(Modifier.padding(padding)) { EmptyState("Institution not found", "It may have been deleted.") }
+            return@Scaffold
+        }
+        val history = remember(data, sourceId, range, today) { sourceHistory(data, sourceId, range, today) }
+        val transactions = data.transactions.filter { it.productId in productIds }
+        val transactionRows = remember(data, productIds) {
+            transactionRows(data, TxFilter.ALL, "").filter { it.transaction.productId in productIds }
+        }
+
+        LazyColumn(
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item { SourceHeader(source, history, range, products.size) }
+            if (history.hasData) {
+                item { RangeSelector(range, { range = it }, Modifier.padding(top = 10.dp)) }
+                if (history.missingFx.isNotEmpty()) item {
+                    Text(
+                        "No exchange rate for ${history.missingFx.joinToString()} yet, so those products are left out of the totals.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+                if (history.line.size >= 2) item {
+                    Panel(title = "Value", modifier = Modifier.padding(top = 6.dp)) {
+                        LineChart(history.line, height = 180.dp)
+                    }
+                }
+                if (products.size > 1) item { SourceBreakdown(history, products) }
+            }
+            item {
+                Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+                    listOf(false to "Products  ${products.size}", true to "Transactions  ${transactions.size}").forEachIndexed { i, (value, label) ->
+                        ToggleButton(
+                            checked = showTransactions == value,
+                            onCheckedChange = { showTransactions = value },
+                            modifier = Modifier.weight(1f),
+                            shapes = if (i == 0) ButtonGroupDefaults.connectedLeadingButtonShapes() else ButtonGroupDefaults.connectedTrailingButtonShapes(),
+                            colors = ToggleButtonDefaults.colors(
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                checkedContainerColor = MaterialTheme.colorScheme.primary,
+                                checkedContentColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                        ) { Text(label) }
+                    }
+                }
+            }
+            if (!showTransactions) {
+                if (products.isEmpty()) item {
+                    Text("No products yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp))
+                }
+                items(products, key = { "p${it.product.id}" }) { row -> ProductCard(row) { onOpenProduct(row.product.id) } }
+            } else {
+                transactionItems(transactionRows) { editingTransaction = it }
+            }
+        }
+    }
+
+    editingProduct?.let { p ->
+        ProductEditor(p, data.sources, data.assetClasses, onDismiss = { editingProduct = null }, onSave = { onSaveProduct(it); editingProduct = null }, onDelete = null)
+    }
+    editingTransaction?.let { t ->
+        TransactionEditor(
+            t, data.products, data.categories,
+            onDismiss = { editingTransaction = null },
+            onSave = { onSaveTransaction(it); editingTransaction = null },
+            onDelete = if (t.id != 0L) ({ onDeleteTransaction(t); editingTransaction = null }) else null,
+        )
+    }
+}
+
+@Composable
+private fun SourceHeader(source: SourceEntity, history: SourceHistoryUi, range: TimeRange, productCount: Int) {
+    Column(Modifier.padding(horizontal = 4.dp)) {
+        Text(source.name, style = MaterialTheme.typography.headlineLarge)
+        Text(
+            listOf(source.type.label, "$productCount product${if (productCount == 1) "" else "s"}").joinToString("  ·  "),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(14.dp))
+        if (!history.hasData) {
+            Text("No balances yet", style = MaterialTheme.typography.displaySmall)
+            return@Column
+        }
+        Text(MoneyFormat.whole(BigDecimal.valueOf(history.total)), style = MaterialTheme.typography.displaySmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val up = history.change >= 0
+            Icon(
+                if (up) Icons.AutoMirrored.Rounded.TrendingUp else Icons.AutoMirrored.Rounded.TrendingDown,
+                contentDescription = if (up) "Up" else "Down",
+                tint = if (up) StrataTheme.colors.gain else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 6.dp).size(18.dp),
+            )
+            Text(
+                MoneyFormat.signedWhole(BigDecimal.valueOf(history.change)) +
+                    (history.changeRatio?.let { "  ·  " + MoneyFormat.percent(it) } ?: "") + "  " + rangePhrase(range),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Each product stacked per period, coloured by its asset class. */
+@Composable
+private fun SourceBreakdown(history: SourceHistoryUi, products: List<ProductRowUi>) {
+    val byId = products.associateBy { it.product.id }
+    val outline = MaterialTheme.colorScheme.outline
+    val colors = products.associate { it.product.id to (it.assetClass?.let { c -> seriesColor(c.colorKey) } ?: outline) }
+    val buckets = history.bars.map { b ->
+        StackBucket(b.date, b.values.map { (id, v) -> BarSegment(id.toString(), byId[id]?.product?.name.orEmpty(), v, colors[id] ?: outline) })
+    }
+    if (buckets.none { it.segments.isNotEmpty() }) return
+    Panel(title = "By product", modifier = Modifier.padding(top = 6.dp)) {
+        StackedBarChart(buckets, height = 200.dp)
     }
 }
 

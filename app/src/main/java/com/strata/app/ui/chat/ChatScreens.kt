@@ -57,6 +57,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.strata.app.ai.RunState
@@ -199,6 +201,12 @@ fun ConversationScreen(
     val listState = rememberLazyListState()
     val count = ui.items.size + (if (ui.run.busy) 1 else 0)
     LaunchedEffect(count) { if (count > 0) listState.animateScrollToItem(count - 1) }
+    // A turn can take minutes; keep the screen awake while it runs so the phone doesn't sleep mid-turn.
+    val view = LocalView.current
+    DisposableEffect(view, ui.run.busy) {
+        view.keepScreenOn = ui.run.busy
+        onDispose { view.keepScreenOn = false }
+    }
 
     Scaffold(
         modifier = modifier,
@@ -240,7 +248,7 @@ fun ConversationScreen(
                 when (item) {
                     is ChatItem.User -> UserBubble(item)
                     is ChatItem.Activity -> ActivityCard(item, initiallyExpanded = expandTraces)
-                    is ChatItem.Assistant -> AssistantBlock(item, onApply, onDiscard, onUndo)
+                    is ChatItem.Assistant -> AssistantBlock(item, ui.run.busy, onApply, onDiscard, onUndo)
                 }
             }
             if (ui.run.busy) item(key = "running") { RunningRow(ui.run) }
@@ -306,18 +314,19 @@ private fun FileChip(name: String, detail: String?, onRemove: (() -> Unit)? = nu
 }
 
 @Composable
-private fun AssistantBlock(item: ChatItem.Assistant, onApply: (ProposalUi) -> Unit, onDiscard: (ProposalUi) -> Unit, onUndo: (ProposalUi) -> Unit) {
+private fun AssistantBlock(item: ChatItem.Assistant, busy: Boolean, onApply: (ProposalUi) -> Unit, onDiscard: (ProposalUi) -> Unit, onUndo: (ProposalUi) -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         if (item.text.isNotBlank()) MarkdownText(item.text, Modifier.padding(end = 12.dp))
         item.proposal?.let {
             Spacer(Modifier.height(12.dp))
-            ProposalCard(it, onApply, onDiscard, onUndo)
+            ProposalCard(it, onApply, onDiscard, onUndo, locked = busy)
         }
     }
 }
 
+/** [locked] while a turn runs: a pending card carries into it and may still change, so it can't be applied yet. */
 @Composable
-fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (ProposalUi) -> Unit, onUndo: (ProposalUi) -> Unit) {
+fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (ProposalUi) -> Unit, onUndo: (ProposalUi) -> Unit, locked: Boolean = false) {
     var expanded by rememberSaveable(p.messageId) { mutableStateOf(false) }
     val pending = p.status == ProposalStatus.PENDING
     val accent = when (p.status) {
@@ -342,6 +351,7 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                             ProposalStatus.APPLIED -> "Applied"
                             ProposalStatus.DISCARDED -> "Discarded"
                             ProposalStatus.UNDONE -> "Undone"
+                            ProposalStatus.SUPERSEDED -> "Replaced by a later card"
                         },
                         style = MaterialTheme.typography.labelLarge,
                         color = accent,
@@ -349,6 +359,8 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                     Text(p.headline, style = MaterialTheme.typography.titleLarge)
                 }
             }
+            // The later card holds the same rows, corrected; repeating them here would only confuse.
+            if (p.status == ProposalStatus.SUPERSEDED) return@Column
             Spacer(Modifier.height(10.dp))
             if (p.warnings.isNotEmpty()) CheckWarnings(p.warnings)
             p.groups.forEach { group ->
@@ -372,8 +384,8 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                 Spacer(Modifier.weight(1f))
                 when (p.status) {
                     ProposalStatus.PENDING -> {
-                        TextButton(onClick = { onDiscard(p) }) { Text("Discard") }
-                        Button(onClick = { onApply(p) }) { Text("Apply") }
+                        TextButton(onClick = { onDiscard(p) }, enabled = !locked) { Text("Discard") }
+                        Button(onClick = { onApply(p) }, enabled = !locked) { Text("Apply") }
                     }
                     ProposalStatus.APPLIED -> if (p.importId != null) {
                         FilledTonalButton(onClick = { onUndo(p) }) {

@@ -39,6 +39,8 @@ import com.strata.app.ui.explorer.ExplorerData
 import com.strata.app.ui.explorer.ExplorerScreen
 import com.strata.app.ui.explorer.ExplorerTab
 import com.strata.app.ui.explorer.ProductDetailScreen
+import com.strata.app.ui.explorer.SourceDetailScreen
+import com.strata.app.ui.explorer.TxFilter
 import com.strata.app.ui.lock.LockScreen
 import com.strata.app.ui.lock.LockUi
 import com.strata.app.ui.setup.AiSettingsUi
@@ -158,15 +160,25 @@ class ScreenshotTest(private val dark: Boolean) {
     }
 
     @Test fun holdings() = shoot("08-data-holdings", tall = 1300) {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it) }
     }
 
     @Test fun transactions() = shoot("09-data-transactions") {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS) }
+    }
+
+    @Test fun transactionsByCategory() = shoot("17-data-spending-categories") {
+        WithNav(TopDestination.DATA) {
+            ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS, initialFilter = TxFilter.SPENDING)
+        }
+    }
+
+    @Test fun institution() = shoot("18-institution-detail", tall = 1500) {
+        SourceDetailScreen(2, explorerData, {}, {}, {}, {}, {}, initialRange = TimeRange.Y1, today = SampleData.today)
     }
 
     @Test fun imports() = shoot("10-data-imports") {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.IMPORTS) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.IMPORTS) }
     }
 
     @Test fun product() = shoot("11-product-detail") {

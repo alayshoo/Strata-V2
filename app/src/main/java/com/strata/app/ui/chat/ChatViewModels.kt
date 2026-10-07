@@ -65,8 +65,11 @@ class ConversationViewModel(private val session: Session, private val chatId: Lo
         session.chatController.send(chatId, message, files.map { it.uri })
     }
 
-    fun apply(p: ProposalUi) = session.chatController.apply(chatId, p.messageId, p.json)
-    fun discard(p: ProposalUi) = session.chatController.discard(p.messageId)
+    // While a turn runs the pending card is carried into it and may still change.
+    private val busy get() = session.chatController.runs.value[chatId]?.busy == true
+
+    fun apply(p: ProposalUi) { if (!busy) session.chatController.apply(chatId, p.messageId, p.json) }
+    fun discard(p: ProposalUi) { if (!busy) session.chatController.discard(p.messageId) }
     fun undo(p: ProposalUi) { p.importId?.let { session.chatController.undo(it) } }
     fun dismissError() = session.chatController.dismissError(chatId)
     fun stop() = session.chatController.stop(chatId)

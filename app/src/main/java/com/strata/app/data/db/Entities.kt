@@ -40,7 +40,8 @@ enum class TxKind(val label: String) {
 
 enum class Role { USER, ASSISTANT, TOOL }
 
-enum class ProposalStatus { PENDING, APPLIED, DISCARDED, UNDONE }
+/** SUPERSEDED: a pending card carried into a later turn and replaced by that turn's card. */
+enum class ProposalStatus { PENDING, APPLIED, DISCARDED, UNDONE, SUPERSEDED }
 
 @Entity(tableName = "sources", indices = [Index(value = ["name"], unique = true)])
 @Serializable

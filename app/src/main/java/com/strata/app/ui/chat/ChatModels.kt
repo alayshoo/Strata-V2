@@ -103,6 +103,8 @@ private val stepNames = mapOf(
     "sum_transactions" to "Added up transactions",
     "calculate" to "Calculated",
     "get_staged_changes" to "Reviewed the draft",
+    "update_staged" to "Corrected the draft",
+    "remove_staged" to "Removed from the draft",
     "clear_staged_changes" to "Started the draft over",
 )
 
