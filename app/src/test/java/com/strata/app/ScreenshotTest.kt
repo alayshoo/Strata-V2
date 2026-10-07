@@ -117,9 +117,9 @@ class ScreenshotTest(private val dark: Boolean) {
         WithNav(TopDestination.DASHBOARD) { DashboardScreen(dashboard(TimeRange.Y1), {}, {}, contentPadding = it) }
     }
 
-    @Test fun dashboardFull() = shoot("03-dashboard-full", tall = 2700) {
+    @Test fun dashboardFull() = shoot("03-dashboard-full", tall = 2160) {
         WithNav(TopDestination.DASHBOARD) {
-            DashboardScreen(dashboard(TimeRange.Y1), {}, {}, contentPadding = it, previewSelection = ChartPreviewSelection(bars = 9, categories = 10))
+            DashboardScreen(dashboard(TimeRange.Y1), {}, {}, contentPadding = it, previewSelection = ChartPreviewSelection(bars = 9))
         }
     }
 
