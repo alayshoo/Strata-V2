@@ -52,6 +52,7 @@ private val monthFormat = DateTimeFormatter.ofPattern("MMM")
 private val dayMonthFormat = DateTimeFormatter.ofPattern("d MMM")
 
 private val yearFormat = DateTimeFormatter.ofPattern("yyyy")
+private val monthYearFormat = DateTimeFormatter.ofPattern("MMMM yyyy")
 
 /** Months read as months; January carries the year so the axis never shows ambiguous "Oct 25". */
 private fun axisDate(date: LocalDate, spanDays: Long): String = when {
@@ -186,8 +187,9 @@ fun LineChart(
 }
 
 /**
- * Asset classes stacked per period. Liabilities hang below the zero line.
+ * Values stacked per period, e.g. asset classes or spending categories. Negatives hang below the zero line.
  * Bars cap at 24dp, a 2dp surface gap separates segments, the outer end is rounded.
+ * [monthly] buckets are labelled by month rather than by their end date.
  */
 @Composable
 fun StackedBarChart(
@@ -195,6 +197,7 @@ fun StackedBarChart(
     modifier: Modifier = Modifier,
     height: Dp = 220.dp,
     initialSelection: Int? = null,
+    monthly: Boolean = false,
 ) {
     val ink = rememberInk()
     val measurer = rememberTextMeasurer()
@@ -261,14 +264,15 @@ fun StackedBarChart(
             }
         }
         drawLine(ink.axisText.color.copy(alpha = 0.5f), Offset(0f, zero), Offset(plotW, zero), strokeWidth = 1.dp.toPx())
-        drawBucketAxis(buckets.map { it.date }, slot, plotH, ink, measurer)
+        drawBucketAxis(buckets.map { it.date }, slot, plotH, ink, measurer, monthsOnly = monthly)
 
         selected?.takeIf { it in buckets.indices }?.let { i ->
             val bucket = buckets[i]
             val total = bucket.segments.sumOf { it.value }
+            val period = if (monthly) bucket.date.format(monthYearFormat) else MoneyFormat.date(bucket.date)
             drawTooltip(
                 anchor = Offset(i * slot + slot / 2, y(tops[i])),
-                title = MoneyFormat.date(bucket.date) + "  ·  " + MoneyFormat.whole(total.toBigDecimal()),
+                title = period + "  ·  " + MoneyFormat.whole(total.toBigDecimal()),
                 lines = bucket.segments.filter { abs(it.value) >= 0.5 }.sortedByDescending { it.value }
                     .map { it.color to "${it.label}  ${MoneyFormat.whole(it.value.toBigDecimal())}" },
                 ink = ink,
@@ -342,7 +346,7 @@ fun PairedBarChart(
             val b = buckets[i]
             drawTooltip(
                 anchor = Offset(i * slot + slot / 2, y(max(b.first, b.second))),
-                title = b.date.format(DateTimeFormatter.ofPattern("MMMM yyyy")),
+                title = b.date.format(monthYearFormat),
                 lines = listOf(
                     firstColor to "$firstLabel  ${MoneyFormat.whole(b.first.toBigDecimal())}",
                     secondColor to "$secondLabel  ${MoneyFormat.whole(b.second.toBigDecimal())}",

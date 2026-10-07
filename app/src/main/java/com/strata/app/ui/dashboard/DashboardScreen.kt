@@ -51,7 +51,7 @@ import com.strata.app.ui.theme.seriesColor
 import java.math.BigDecimal
 
 /** Chart selections are only used to pose screenshots. */
-data class ChartPreviewSelection(val line: Int? = null, val bars: Int? = null, val flows: Int? = null)
+data class ChartPreviewSelection(val line: Int? = null, val bars: Int? = null, val flows: Int? = null, val categories: Int? = null)
 
 @Composable
 fun DashboardScreen(
@@ -95,6 +95,7 @@ fun DashboardScreen(
         }
         item { AssetClassPanel(state, previewSelection.bars) }
         item { CashFlowPanel(state, previewSelection.flows) }
+        item { SpendingCategoryPanel(state, previewSelection.categories) }
     }
 }
 
@@ -223,12 +224,37 @@ private fun CashFlowPanel(state: DashboardState, selection: Int?) {
             state.flows, colors.income, colors.spending, "Income", "Spending",
             initialSelection = selection,
         )
-        if (state.categories.isNotEmpty()) {
-            Spacer(Modifier.height(18.dp))
-            Text("Where it went", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
-            val top = state.categories.first().value
-            state.categories.take(6).forEach { c -> CategoryBar(c.name, c.value, c.share, top, seriesColor(c.colorKey)) }
+    }
+}
+
+@Composable
+private fun SpendingCategoryPanel(state: DashboardState, selection: Int?) {
+    Panel(title = "Spending by category") {
+        if (state.categories.isEmpty()) {
+            Text(
+                "Once spending is recorded, each month's total shows here split by category.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@Panel
+        }
+        val byId = state.categories.associateBy { it.id }
+        val outline = MaterialTheme.colorScheme.outline
+        val buckets = state.categoryBars.map { b ->
+            StackBucket(b.date, b.values.map { (id, v) ->
+                val c = byId[id]
+                BarSegment(id.toString(), c?.name ?: "Uncategorised", v, c?.let { seriesColor(it.colorKey) } ?: outline)
+            })
+        }
+        StackedBarChart(buckets, initialSelection = selection, monthly = true)
+        Spacer(Modifier.height(12.dp))
+        state.categories.forEach { c ->
+            LegendRow(
+                color = seriesColor(c.colorKey),
+                label = c.name,
+                value = MoneyFormat.whole(BigDecimal.valueOf(c.value)),
+                detail = MoneyFormat.percent(c.share),
+            )
         }
     }
 }
@@ -242,22 +268,6 @@ private fun FlowTotal(label: String, value: Double, color: androidx.compose.ui.g
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(MoneyFormat.whole(BigDecimal.valueOf(value)), style = Figures.large)
-    }
-}
-
-@Composable
-private fun CategoryBar(name: String, value: Double, share: Double, max: Double, color: androidx.compose.ui.graphics.Color) {
-    Column(Modifier.padding(vertical = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Text(MoneyFormat.percent(share), style = Figures.small, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(10.dp))
-            Text(MoneyFormat.whole(BigDecimal.valueOf(value)), style = Figures.small)
-        }
-        Spacer(Modifier.height(5.dp))
-        Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh)) {
-            Box(Modifier.fillMaxWidth((value / max).toFloat().coerceIn(0.02f, 1f)).fillMaxHeight().clip(CircleShape).background(color))
-        }
     }
 }
 

@@ -267,6 +267,21 @@ fun monthlyFlows(items: List<FlowItem>, start: LocalDate, end: LocalDate, fx: Fx
     }
 }
 
+/** Spending per category for each month in EUR, keyed by category id (null means uncategorised). */
+fun monthlySpendingByCategory(items: List<FlowItem>, start: LocalDate, end: LocalDate, fx: FxTable): List<Pair<LocalDate, Map<Long?, BigDecimal>>> {
+    val months = bucketEnds(start, end, Granularity.MONTH)
+    return months.map { monthEnd ->
+        val monthStart = maxOf(monthEnd.withDayOfMonth(1), start)
+        val totals = HashMap<Long?, BigDecimal>()
+        for (item in items) {
+            if (item.isIncome || item.date < monthStart || item.date > monthEnd) continue
+            val eur = fx.toEur(item.amount, item.currency, item.date) ?: continue
+            totals.merge(item.categoryId, eur.negate(), BigDecimal::add)
+        }
+        monthEnd to totals
+    }
+}
+
 /** Spending per category over the range, largest first. Null id means uncategorised. */
 fun spendingByCategory(items: List<FlowItem>, start: LocalDate, end: LocalDate, fx: FxTable): List<Pair<Long?, BigDecimal>> {
     val totals = HashMap<Long?, BigDecimal>()
