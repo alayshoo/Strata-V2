@@ -119,6 +119,14 @@ class Agent(
                 finish(chatId, STOPPED_MESSAGE + if (executor.staged.isEmpty) "" else " What was staged before that is below.", executor.staged, null)
             }
             throw e
+        } catch (e: Exception) {
+            // A timeout or provider error should not throw away batches already staged in this turn.
+            if (!executor.staged.isEmpty) {
+                withContext(NonCancellable) {
+                    finish(chatId, "The model stopped responding (${e.message ?: "error"}). Here is what was staged before that; you can apply it and ask me to continue.", executor.staged, null)
+                }
+            }
+            throw e
         }
     }
 
@@ -191,7 +199,8 @@ class Agent(
     }
 
     companion object {
-        const val MAX_ROUNDS = 16
+        /** Batched staging takes many short rounds; the user can always stop a turn. */
+        const val MAX_ROUNDS = 40
         const val STOPPED_MESSAGE = "Stopped."
 
         fun systemPrompt(today: LocalDate, userNote: String = ""): String = buildString {
@@ -241,6 +250,16 @@ class Agent(
               for a security, the units held are sum_quantity. Say in the reply that you derived it.
             - Staging tools return "checks". A MISMATCH means a balance disagrees with its transactions. Never ignore it: correct
               what you staged (clear_staged_changes and redo if needed) or tell the user plainly why they differ.
+
+            Time and size limits
+            - Each of your responses must finish within about 5 minutes or it is cut off and lost. A tool call with a long list
+              of items, or a long stretch of thinking, is what runs out of time.
+            - Stage in small batches: about 20 items per stage_transactions or stage_snapshots call, then call again for the
+              next batch. Everything staged during this turn adds up into one review card, so there is no need to do it in
+              one go. More, smaller calls are always better than one big call.
+            - Read only what you need. Give get_transactions a product_id and a narrow from/to range, e.g. the statement's
+              period. Do not read a product's whole history to check for duplicates.
+            - Keep your reasoning short and to the point.
 
             How to work
             - Start by reading the lists and products you need. Never guess ids.

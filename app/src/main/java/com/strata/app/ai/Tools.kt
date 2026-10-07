@@ -95,13 +95,15 @@ object ToolSpecs {
         )
         add(
             tool(
-                "get_transactions", "Recorded transactions, newest first. Use to avoid duplicates before staging.",
+                "get_transactions",
+                "Recorded transactions, newest first. Always pass product_id and a from/to range covering only the period " +
+                    "you need (a statement's period, or a few days around one date); unbounded reads waste your time budget.",
                 props(
                     "product_id" to prop("integer", "Only this product."),
                     "from" to prop("string", "Start date, YYYY-MM-DD."),
                     "to" to prop("string", "End date, YYYY-MM-DD."),
                     "kind" to prop("string", "One of: $kinds."),
-                    "limit" to prop("integer", "Max rows, up to 300. Default 100."),
+                    "limit" to prop("integer", "Max rows, up to 200. Default 50."),
                 ),
             )
         )
@@ -314,12 +316,15 @@ class ToolExecutor(
         }
         "get_transactions" -> {
             val kind = args.string("kind")?.let(::parseKind)
-            val limit = (args.long("limit") ?: 100).toInt().coerceIn(1, 300)
-            buildJsonArray {
-                db.ledgerDao().transactions(
-                    args.long("product_id"), args.date("from") ?: LocalDate.of(1900, 1, 1),
-                    args.date("to") ?: LocalDate.of(2999, 1, 1), kind, limit,
-                ).forEach { t -> add(transactionJson(t)) }
+            val limit = (args.long("limit") ?: 50).toInt().coerceIn(1, 200)
+            // One extra row tells us whether the range was cut off.
+            val rows = db.ledgerDao().transactions(
+                args.long("product_id"), args.date("from") ?: LocalDate.of(1900, 1, 1),
+                args.date("to") ?: LocalDate.of(2999, 1, 1), kind, limit + 1,
+            )
+            buildJsonObject {
+                putJsonArray("transactions") { rows.take(limit).forEach { t -> add(transactionJson(t)) } }
+                if (rows.size > limit) put("truncated", "Only the newest $limit are shown. Narrow from/to or pass product_id instead of raising the limit.")
             }
         }
         "find_transfer_candidates" -> {

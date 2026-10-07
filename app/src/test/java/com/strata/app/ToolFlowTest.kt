@@ -123,6 +123,20 @@ class ToolFlowTest {
         assertTrue(bad, bad.contains("error"))
     }
 
+    @Test fun transactionReadsAreCappedAndSayWhenCut() = runBlocking {
+        repeat(60) { i ->
+            db.ledgerDao().insertTransaction(
+                TransactionEntity(productId = 1, date = LocalDate.of(2026, 9, 1).plusDays(i % 28L), amount = BigDecimal("-1.00"), description = "row $i", kind = TxKind.EXPENSE)
+            )
+        }
+        val all = tools.execute("get_transactions", """{"product_id":1}""")
+        assertTrue(all, all.contains("\"truncated\""))
+        assertEquals(50, Regex("\"description\"").findAll(all).count())
+
+        val narrow = tools.execute("get_transactions", """{"product_id":1,"from":"2026-09-01","to":"2026-09-03"}""")
+        assertTrue(!narrow.contains("truncated"))
+    }
+
     @Test fun skipsDuplicatesAndLinksExistingLegs() = runBlocking {
         val existing = db.ledgerDao().insertTransaction(
             TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 25), amount = BigDecimal("800"), description = "Deposit", kind = TxKind.TRANSFER)
