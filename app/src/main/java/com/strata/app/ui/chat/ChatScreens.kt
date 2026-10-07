@@ -23,6 +23,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -57,6 +61,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -252,10 +257,11 @@ fun ConversationScreen(
             if (!ui.hasApiKey) item { KeyNotice(onOpenSetup) }
             if (ui.items.isEmpty() && ui.hasApiKey) item { ConversationHint() }
             items(ui.items, key = { it.key }) { item ->
+                // Messages select and copy like any text: long-press, drag the handles, then Copy.
                 when (item) {
-                    is ChatItem.User -> UserBubble(item)
+                    is ChatItem.User -> SelectionContainer { UserBubble(item) }
                     is ChatItem.Activity -> ActivityCard(item, initiallyExpanded = expandTraces)
-                    is ChatItem.Assistant -> AssistantBlock(item, ui.run.busy, onApply, onDiscard, onUndo)
+                    is ChatItem.Assistant -> SelectionContainer { AssistantBlock(item, ui.run.busy, onApply, onDiscard, onUndo) }
                 }
             }
             if (ui.run.busy) item(key = "running") { RunningRow(ui.run) }
@@ -291,7 +297,11 @@ private fun UserBubble(item: ChatItem.User) {
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 8.dp),
                 modifier = Modifier.widthIn(max = 320.dp),
             ) {
-                Text(item.text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp))
+                // The default highlight is the primary colour, which would vanish on this bubble.
+                val onBubble = MaterialTheme.colorScheme.onPrimary
+                CompositionLocalProvider(LocalTextSelectionColors provides TextSelectionColors(onBubble, onBubble.copy(alpha = 0.35f))) {
+                    Text(item.text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp))
+                }
             }
         }
     }
@@ -389,24 +399,27 @@ fun ProposalCard(p: ProposalUi, onApply: (ProposalUi) -> Unit, onDiscard: (Propo
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (p.groups.any { it.kind == GroupKind.ADD && it.lines.size > 3 }) {
-                    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Show less" else "Show all") }
-                }
-                Spacer(Modifier.weight(1f))
-                when (p.status) {
-                    ProposalStatus.PENDING -> {
-                        TextButton(onClick = { onDiscard(p) }, enabled = !locked) { Text("Discard") }
-                        Button(onClick = { onApply(p) }, enabled = !locked) { Text(if (p.rewrites != null) "Apply corrections" else "Apply") }
+            // Button labels are controls, not text to copy.
+            DisableSelection {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (p.groups.any { it.kind == GroupKind.ADD && it.lines.size > 3 }) {
+                        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Show less" else "Show all") }
                     }
-                    ProposalStatus.APPLIED -> if (p.importId != null) {
-                        FilledTonalButton(onClick = { onUndo(p) }) {
-                            Icon(Icons.AutoMirrored.Rounded.Undo, null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Undo import")
+                    Spacer(Modifier.weight(1f))
+                    when (p.status) {
+                        ProposalStatus.PENDING -> {
+                            TextButton(onClick = { onDiscard(p) }, enabled = !locked) { Text("Discard") }
+                            Button(onClick = { onApply(p) }, enabled = !locked) { Text(if (p.rewrites != null) "Apply corrections" else "Apply") }
                         }
+                        ProposalStatus.APPLIED -> if (p.importId != null) {
+                            FilledTonalButton(onClick = { onUndo(p) }) {
+                                Icon(Icons.AutoMirrored.Rounded.Undo, null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Undo import")
+                            }
+                        }
+                        else -> Unit
                     }
-                    else -> Unit
                 }
             }
         }
