@@ -96,7 +96,7 @@ private fun rememberInk(): ChartInk {
 private const val AXIS_WIDTH_DP = 44
 private const val X_AXIS_HEIGHT_DP = 22
 
-/** Net worth over time: 2dp line over a 10% wash, drag to scrub. */
+/** A value over time, net worth by default: 2dp line over a 10% wash, drag to scrub. */
 @Composable
 fun LineChart(
     points: List<LinePoint>,
@@ -104,6 +104,9 @@ fun LineChart(
     color: Color = MaterialTheme.colorScheme.primary,
     height: Dp = 200.dp,
     initialSelection: Int? = null,
+    valueFormat: (Double) -> String = { MoneyFormat.whole(it.toBigDecimal()) },
+    axisFormat: (Double) -> String = MoneyFormat::compact,
+    dateFormat: (LocalDate) -> String = MoneyFormat::date,
 ) {
     val ink = rememberInk()
     val measurer = rememberTextMeasurer()
@@ -149,7 +152,7 @@ fun LineChart(
         fun y(v: Double) = (plotH - ((v - yMin) / (yMax - yMin)) * plotH).toFloat()
         fun x(i: Int) = (points[i].date.toEpochDay() - first).toFloat() / span * plotW
 
-        drawGrid(ticks, ::y, plotW, axisW, ink, measurer)
+        drawGrid(ticks, ::y, plotW, axisW, ink, measurer, axisFormat)
 
         val line = Path()
         points.forEachIndexed { i, p -> if (i == 0) line.moveTo(x(i), y(p.value)) else line.lineTo(x(i), y(p.value)) }
@@ -175,8 +178,8 @@ fun LineChart(
         if (selected != null) {
             drawTooltip(
                 anchor = Offset(fx, fy),
-                title = MoneyFormat.date(points[focus].date),
-                lines = listOf(null to MoneyFormat.whole(points[focus].value.toBigDecimal())),
+                title = dateFormat(points[focus].date),
+                lines = listOf(null to valueFormat(points[focus].value)),
                 ink = ink,
                 measurer = measurer,
                 bounds = Size(plotW, plotH),
@@ -186,8 +189,9 @@ fun LineChart(
 }
 
 /**
- * Asset classes stacked per period. Liabilities hang below the zero line.
+ * Values stacked per period, e.g. asset classes or spending categories. Negatives hang below the zero line.
  * Bars cap at 24dp, a 2dp surface gap separates segments, the outer end is rounded.
+ * [monthly] buckets are labelled by month rather than by their end date.
  */
 @Composable
 fun StackedBarChart(
@@ -195,6 +199,7 @@ fun StackedBarChart(
     modifier: Modifier = Modifier,
     height: Dp = 220.dp,
     initialSelection: Int? = null,
+    monthly: Boolean = false,
 ) {
     val ink = rememberInk()
     val measurer = rememberTextMeasurer()
@@ -261,14 +266,15 @@ fun StackedBarChart(
             }
         }
         drawLine(ink.axisText.color.copy(alpha = 0.5f), Offset(0f, zero), Offset(plotW, zero), strokeWidth = 1.dp.toPx())
-        drawBucketAxis(buckets.map { it.date }, slot, plotH, ink, measurer)
+        drawBucketAxis(buckets.map { it.date }, slot, plotH, ink, measurer, monthsOnly = monthly)
 
         selected?.takeIf { it in buckets.indices }?.let { i ->
             val bucket = buckets[i]
             val total = bucket.segments.sumOf { it.value }
+            val period = if (monthly) MoneyFormat.monthYear(bucket.date) else MoneyFormat.date(bucket.date)
             drawTooltip(
                 anchor = Offset(i * slot + slot / 2, y(tops[i])),
-                title = MoneyFormat.date(bucket.date) + "  ·  " + MoneyFormat.whole(total.toBigDecimal()),
+                title = period + "  ·  " + MoneyFormat.whole(total.toBigDecimal()),
                 lines = bucket.segments.filter { abs(it.value) >= 0.5 }.sortedByDescending { it.value }
                     .map { it.color to "${it.label}  ${MoneyFormat.whole(it.value.toBigDecimal())}" },
                 ink = ink,
@@ -342,7 +348,7 @@ fun PairedBarChart(
             val b = buckets[i]
             drawTooltip(
                 anchor = Offset(i * slot + slot / 2, y(max(b.first, b.second))),
-                title = b.date.format(DateTimeFormatter.ofPattern("MMMM yyyy")),
+                title = MoneyFormat.monthYear(b.date),
                 lines = listOf(
                     firstColor to "$firstLabel  ${MoneyFormat.whole(b.first.toBigDecimal())}",
                     secondColor to "$secondLabel  ${MoneyFormat.whole(b.second.toBigDecimal())}",
@@ -363,11 +369,12 @@ private fun DrawScope.drawGrid(
     axisW: Float,
     ink: ChartInk,
     measurer: TextMeasurer,
+    label: (Double) -> String = MoneyFormat::compact,
 ) {
     for (t in ticks) {
         val ty = y(t)
         drawLine(ink.grid, Offset(0f, ty), Offset(plotW, ty), strokeWidth = 1.dp.toPx())
-        val layout = measurer.measure(MoneyFormat.compact(t), ink.axisText)
+        val layout = measurer.measure(label(t), ink.axisText)
         drawText(layout, topLeft = Offset(plotW + axisW - layout.size.width, ty - layout.size.height / 2f))
     }
 }

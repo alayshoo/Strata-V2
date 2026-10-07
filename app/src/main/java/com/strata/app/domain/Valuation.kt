@@ -168,6 +168,12 @@ class Valuator(
 
     val earliest: LocalDate? = firstSeen.values.minOrNull()
 
+    /** The date of a product's first balance or transaction. */
+    fun firstRecord(productId: Long): LocalDate? = firstSeen[productId]
+
+    /** True for products valued on units and price rather than on their amount. */
+    fun holdsUnits(productId: Long): Boolean = productId in unitBased
+
     /** Currencies that had no rate when we needed one. */
     val missingCurrencies = mutableSetOf<String>()
 
@@ -264,6 +270,21 @@ fun monthlyFlows(items: List<FlowItem>, start: LocalDate, end: LocalDate, fx: Fx
             if (item.isIncome) income += eur else spending -= eur
         }
         MonthFlow(monthEnd, income, spending)
+    }
+}
+
+/** Spending per category for each month in EUR, keyed by category id (null means uncategorised). */
+fun monthlySpendingByCategory(items: List<FlowItem>, start: LocalDate, end: LocalDate, fx: FxTable): List<Pair<LocalDate, Map<Long?, BigDecimal>>> {
+    val months = bucketEnds(start, end, Granularity.MONTH)
+    return months.map { monthEnd ->
+        val monthStart = maxOf(monthEnd.withDayOfMonth(1), start)
+        val totals = HashMap<Long?, BigDecimal>()
+        for (item in items) {
+            if (item.isIncome || item.date < monthStart || item.date > monthEnd) continue
+            val eur = fx.toEur(item.amount, item.currency, item.date) ?: continue
+            totals.merge(item.categoryId, eur.negate(), BigDecimal::add)
+        }
+        monthEnd to totals
     }
 }
 

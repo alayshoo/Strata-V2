@@ -107,7 +107,7 @@ class ScreenshotTest(private val dark: Boolean) {
     )
 
     private fun dashboard(range: TimeRange) = buildDashboard(
-        DashboardInput(SampleData.assetClasses, SampleData.products, SampleData.snapshots, SampleData.transactions, SampleData.categories, SampleData.fx),
+        DashboardInput(SampleData.assetClasses, SampleData.products, SampleData.snapshots, SampleData.transactions, SampleData.categories, SampleData.fx, SampleData.sources),
         range, SampleData.today,
     )
 
@@ -117,7 +117,7 @@ class ScreenshotTest(private val dark: Boolean) {
         WithNav(TopDestination.DASHBOARD) { DashboardScreen(dashboard(TimeRange.Y1), {}, {}, contentPadding = it) }
     }
 
-    @Test fun dashboardFull() = shoot("03-dashboard-full", tall = 2280) {
+    @Test fun dashboardFull() = shoot("03-dashboard-full", tall = 3780) {
         WithNav(TopDestination.DASHBOARD) {
             DashboardScreen(dashboard(TimeRange.Y1), {}, {}, contentPadding = it, previewSelection = ChartPreviewSelection(bars = 9))
         }

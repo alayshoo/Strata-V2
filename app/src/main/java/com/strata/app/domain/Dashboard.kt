@@ -3,6 +3,7 @@ package com.strata.app.domain
 import com.strata.app.data.db.AssetClassEntity
 import com.strata.app.data.db.ProductEntity
 import com.strata.app.data.db.SnapshotEntity
+import com.strata.app.data.db.SourceEntity
 import com.strata.app.data.db.SpendingCategoryEntity
 import com.strata.app.data.db.TransactionEntity
 import com.strata.app.data.db.TxKind
@@ -24,7 +25,10 @@ data class ClassSlice(
 /** Per-period values by asset class; liabilities are negative. */
 data class ClassBucket(val date: LocalDate, val values: List<Pair<Long, Double>>)
 
-data class CategorySlice(val name: String, val colorKey: String, val value: Double, val share: Double)
+data class CategorySlice(val id: Long?, val name: String, val colorKey: String, val value: Double, val share: Double)
+
+/** Per-month spending by category; null id means uncategorised. */
+data class CategoryBucket(val date: LocalDate, val values: List<Pair<Long?, Double>>)
 
 data class DashboardInput(
     val assetClasses: List<AssetClassEntity>,
@@ -33,6 +37,7 @@ data class DashboardInput(
     val transactions: List<TransactionEntity>,
     val categories: List<SpendingCategoryEntity>,
     val fx: FxTable,
+    val sources: List<SourceEntity> = emptyList(),
 )
 
 data class DashboardState(
@@ -47,6 +52,13 @@ data class DashboardState(
     val income: Double = 0.0,
     val spending: Double = 0.0,
     val categories: List<CategorySlice> = emptyList(),
+    val categoryBars: List<CategoryBucket> = emptyList(),
+    val growth: List<GrowthBucket> = emptyList(),
+    val institutions: List<InstitutionSlice> = emptyList(),
+    val holdingsIncome: List<IncomeFromHoldings> = emptyList(),
+    val hasHoldingsIncome: Boolean = false,
+    val savingsRate: List<LinePoint> = emptyList(),
+    val lastMonth: LastMonthExpenses? = null,
     val missingFx: Set<String> = emptySet(),
     val hasData: Boolean = false,
     val hasFlows: Boolean = false,
@@ -103,8 +115,30 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
     val categoryMap = input.categories.associateBy { it.id }
     val categories = byCategory.map { (id, v) ->
         val c = id?.let { categoryMap[it] }
-        CategorySlice(c?.name ?: "Uncategorised", c?.colorKey ?: "graphite", v.toDouble(), if (categoryTotal > 0) v.toDouble() / categoryTotal else 0.0)
+        CategorySlice(id, c?.name ?: "Uncategorised", c?.colorKey ?: "graphite", v.toDouble(), if (categoryTotal > 0) v.toDouble() / categoryTotal else 0.0)
     }
+
+    // Largest categories sit at the base of every bar, so the stacks read the same month to month.
+    val categoryOrder = byCategory.map { it.first }
+    val categoryBars = monthlySpendingByCategory(flowItems, flowStart, today, input.fx).map { (monthEnd, totals) ->
+        CategoryBucket(monthEnd, categoryOrder.mapNotNull { id ->
+            totals[id]?.toDouble()?.takeIf { it > 0 }?.let { id to it }
+        })
+    }
+
+    val classIsLiability = input.assetClasses.associate { it.id to it.isLiability }
+    val growth = growthBuckets(
+        valuator,
+        input.products.associate { it.id to (classIsLiability[it.assetClassId] == true) },
+        liabilityIds, flowItems, input.fx, start,
+        bucketEnds(start, today, Granularity.MONTH),
+    )
+    val institutions = institutionSlices(
+        valuator, input.sources,
+        input.products.map { Triple(it.id, it.sourceId, classIsLiability[it.assetClassId] == true) },
+        today,
+    )
+    val holdingsKinds = setOf(TxKind.DIVIDEND, TxKind.INTEREST, TxKind.FEE)
 
     val change = netNow - netStart
     return DashboardState(
@@ -119,6 +153,13 @@ fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = L
         income = income,
         spending = spending,
         categories = categories,
+        categoryBars = categoryBars,
+        growth = growth,
+        institutions = institutions,
+        holdingsIncome = incomeFromHoldings(input.transactions, currencyOf, input.fx, flowStart, today),
+        hasHoldingsIncome = input.transactions.any { it.kind in holdingsKinds },
+        savingsRate = savingsRateTrend(flowItems, start, today, input.fx),
+        lastMonth = lastMonthExpenses(input.transactions, currencyOf, categoryMap, input.fx, today),
         missingFx = valuator.missingCurrencies.toSet(),
         hasData = input.snapshots.isNotEmpty() || input.transactions.isNotEmpty(),
         hasFlows = flowItems.isNotEmpty(),

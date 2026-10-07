@@ -29,6 +29,7 @@ class DashboardViewModel(private val session: Session) : ViewModel() {
         session.ledger.transactions,
         session.setup.spendingCategories,
         session.fx.table,
+        session.setup.sources,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         DashboardInput(
@@ -38,6 +39,7 @@ class DashboardViewModel(private val session: Session) : ViewModel() {
             transactions = values[3] as List<com.strata.app.data.db.TransactionEntity>,
             categories = values[4] as List<com.strata.app.data.db.SpendingCategoryEntity>,
             fx = values[5] as com.strata.app.domain.FxTable,
+            sources = values[6] as List<com.strata.app.data.db.SourceEntity>,
         )
     }
 

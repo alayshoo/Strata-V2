@@ -129,6 +129,12 @@ object SampleData {
             tx(25, -800.0, "Monthly investing", "Trade Republic", TxKind.TRANSFER, null, product = 1, group = g)
             tx(25, 800.0, "Deposit", "Millennium BCP", TxKind.TRANSFER, null, product = 4, group = g)
             tx(26, -760.0, "Savings plan VWCE", "Trade Republic", TxKind.TRADE, null, product = 4, group = "$g-trade")
+            tx(26, -1.0, "Order fee", "Trade Republic", TxKind.FEE, null, product = 4)
+            tx(28, 24.0 + rnd.nextDouble(0.0, 4.0), "Interest", "Millennium BCP", TxKind.INTEREST, null, product = 2)
+            if (month.monthValue % 3 == 2) {
+                tx(15, 10.4, "Dividend AAPL", "Interactive Brokers", TxKind.DIVIDEND, null, product = 6)
+                tx(12, 14.94, "Dividend MSFT", "Interactive Brokers", TxKind.DIVIDEND, null, product = 7)
+            }
             month = month.plusMonths(1)
         }
     }.sortedByDescending { it.date }

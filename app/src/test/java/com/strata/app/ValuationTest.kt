@@ -10,6 +10,7 @@ import com.strata.app.domain.ValuedProduct
 import com.strata.app.domain.Valuator
 import com.strata.app.domain.bucketEnds
 import com.strata.app.domain.monthlyFlows
+import com.strata.app.domain.monthlySpendingByCategory
 import com.strata.app.domain.netWorth
 import com.strata.app.domain.spendingByCategory
 import org.junit.Assert.assertEquals
@@ -122,5 +123,24 @@ class ValuationTest {
         assertEquals(0, bd("70").compareTo(months.single().spending))
         assertEquals(0, bd("2000").compareTo(months.single().income))
         assertEquals(0, bd("70.00").compareTo(spendingByCategory(items, d("2026-09-01"), d("2026-09-30"), FxTable.EMPTY).single().second))
+    }
+
+    @Test fun splitsEachMonthsSpendingByCategory() {
+        val items = listOf(
+            FlowItem(d("2026-08-05"), bd("-40"), "EUR", false, 2),
+            FlowItem(d("2026-09-02"), bd("-100"), "EUR", false, 1),
+            FlowItem(d("2026-09-10"), bd("30"), "EUR", false, 1),
+            FlowItem(d("2026-09-12"), bd("-15"), "EUR", false, null),
+            FlowItem(d("2026-09-24"), bd("2000"), "EUR", true, 9),
+        )
+        val months = monthlySpendingByCategory(items, d("2026-08-01"), d("2026-09-30"), FxTable.EMPTY)
+        assertEquals(listOf(d("2026-08-31"), d("2026-09-30")), months.map { it.first })
+        assertEquals(setOf<Long?>(2), months[0].second.keys)
+        assertEquals(0, bd("70").compareTo(months[1].second[1]))
+        assertEquals(0, bd("15").compareTo(months[1].second[null]))
+        assertNull(months[1].second[9])
+        // The months add up to the same total as the flows.
+        val flows = monthlyFlows(items, d("2026-08-01"), d("2026-09-30"), FxTable.EMPTY)
+        months.zip(flows).forEach { (m, f) -> assertEquals(0, f.spending.compareTo(m.second.values.fold(BigDecimal.ZERO, BigDecimal::add))) }
     }
 }
