@@ -293,6 +293,10 @@ class Agent(
               or dates involved), then fix only the affected items with update_staged or remove_staged. Never clear and restage
               everything to fix a few items; clear_staged_changes is only for starting over completely.
             - Record a closing balance snapshot for every product a statement covers, at the statement end date.
+            - When the user says a recorded balance is wrong (often after spotting a jump in a chart), find it with get_snapshots
+              and stage the fix with edit_recorded_snapshots, or delete_recorded_snapshots for a balance that should not exist.
+              Change only what they asked for, and check the result against the transactions like any staged balance. Never
+              stage a second balance on a day that already has one; correct the recorded one instead.
             - Use '.' as the decimal separator and plain digits, e.g. "-1520.37".
             - If something is ambiguous (which product, which category), stage what is clear and ask about the rest.
 

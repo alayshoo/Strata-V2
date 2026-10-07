@@ -2,6 +2,7 @@ package com.strata.app.ui.chat
 
 import com.strata.app.ai.ChangeSet
 import com.strata.app.ai.ProductPointer
+import com.strata.app.ai.SnapshotEdit
 import com.strata.app.data.db.AttachmentEntity
 import com.strata.app.data.db.MessageEntity
 import com.strata.app.data.db.ProductEntity
@@ -104,6 +105,8 @@ private val stepNames = mapOf(
     "stage_snapshots" to "Staged balances",
     "stage_transactions" to "Staged transactions",
     "link_transfer" to "Linked a transfer",
+    "edit_recorded_snapshots" to "Corrected recorded balances",
+    "delete_recorded_snapshots" to "Removed recorded balances",
     "sum_transactions" to "Added up transactions",
     "calculate" to "Calculated",
     "get_staged_changes" to "Reviewed the draft",
@@ -175,6 +178,22 @@ fun buildChatItems(messages: List<MessageEntity>, attachments: List<AttachmentEn
     return items
 }
 
+/** What a correction changes, next to the corrected value: "30 Sep 2026  ·  was €1,000.00". */
+private fun editSummary(e: SnapshotEdit, currency: String): String {
+    val (old, new) = e.before to e.after
+    fun differs(a: String?, b: String?) = if (a == null || b == null) a != b else BigDecimal(a).compareTo(BigDecimal(b)) != 0
+    fun units(q: String?) = q?.let { MoneyFormat.quantity(BigDecimal(it)) } ?: "none"
+    fun price(p: String?) = p?.let { MoneyFormat.full(BigDecimal(it), currency) } ?: "none"
+    val newDate = MoneyFormat.date(LocalDate.parse(new.date))
+    return buildList {
+        add(if (old.date != new.date) "moved from ${MoneyFormat.date(LocalDate.parse(old.date))} to $newDate" else newDate)
+        if (differs(old.value, new.value)) add("was ${MoneyFormat.full(BigDecimal(old.value), currency)}")
+        if (differs(old.quantity, new.quantity)) add("units ${units(old.quantity)} → ${units(new.quantity)}")
+        if (differs(old.unitPrice, new.unitPrice)) add("price ${price(old.unitPrice)} → ${price(new.unitPrice)}")
+        if (old.note != new.note) add(if (new.note.isBlank()) "note cleared" else "note: ${new.note}")
+    }.joinToString("  ·  ")
+}
+
 private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): ProposalUi? {
     val changes = runCatching { json.decodeFromString(ChangeSet.serializer(), raw) }.getOrNull() ?: return null
     val products = lookup.products.associateBy { it.id }
@@ -210,6 +229,14 @@ private fun proposalUi(message: MessageEntity, raw: String, lookup: Lookup): Pro
         }))
         if (changes.links.isNotEmpty()) add(ProposalGroup("Transfer links", changes.links.map {
             ProposalLine("Link ${it.transactionIds.size} legs", it.transactionIds.joinToString(" ↔ ") { id -> "#$id" })
+        }))
+        if (changes.snapshotEdits.isNotEmpty()) add(ProposalGroup("Corrected balances", changes.snapshotEdits.map {
+            val (name, currency) = productName(ProductPointer(id = it.after.productId))
+            ProposalLine(name, editSummary(it, currency), MoneyFormat.full(BigDecimal(it.after.value), currency))
+        }))
+        if (changes.snapshotDeletions.isNotEmpty()) add(ProposalGroup("Removed balances", changes.snapshotDeletions.map {
+            val (name, currency) = productName(ProductPointer(id = it.before.productId))
+            ProposalLine(name, "${MoneyFormat.date(LocalDate.parse(it.before.date))}  ·  removed", MoneyFormat.full(BigDecimal(it.before.value), currency))
         }))
     }
     val status = message.proposalStatus ?: ProposalStatus.PENDING

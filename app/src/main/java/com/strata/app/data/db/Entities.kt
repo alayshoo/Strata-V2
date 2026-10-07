@@ -153,6 +153,15 @@ data class ImportEntity(
     val summary: String,
     val createdAt: Long = System.currentTimeMillis(),
     val undoneAt: Long? = null,
+    /** Recorded rows this import changed or removed, as they were before, serialized [ImportRevert]. */
+    val revertJson: String? = null,
+)
+
+/** What undoing an import puts back besides removing the rows it added. */
+@Serializable
+data class ImportRevert(
+    val editedSnapshots: List<SnapshotEntity> = emptyList(),
+    val deletedSnapshots: List<SnapshotEntity> = emptyList(),
 )
 
 @Entity(tableName = "fx_rates", primaryKeys = ["date", "currency"])

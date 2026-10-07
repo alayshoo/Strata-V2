@@ -69,19 +69,25 @@ object Reconcile {
         return out
     }
 
-    /** Stored and staged rows merged per product, ready for [check]. */
+    /** Stored and staged rows merged per product, ready for [check]. Staged corrections replace the balances they change. */
     fun inputs(
         changes: ChangeSet,
         storedSnapshots: List<SnapshotEntity>,
         storedTransactions: List<TransactionEntity>,
     ): Pair<Map<Key, List<Point>>, Map<Key, List<Flow>>> {
+        val edits = changes.snapshotEdits.associateBy { it.snapshotId }
+        val deleted = changes.snapshotDeletions.map { it.snapshotId }.toSet()
         val touched = (changes.snapshots.map { it.product } + changes.transactions.map { it.product })
-            .map { Key(it.id, it.ref) }.toSet()
+            .map { Key(it.id, it.ref) }.toSet() +
+            (changes.snapshotEdits.map { it.after.productId } + changes.snapshotDeletions.map { it.before.productId }).map { Key(it, null) }
         val points = HashMap<Key, MutableList<Point>>()
         val flows = HashMap<Key, MutableList<Flow>>()
         for (s in storedSnapshots) {
             val key = Key(s.productId, null)
-            if (key in touched) points.getOrPut(key) { mutableListOf() } += Point(s.date, s.value, s.quantity)
+            if (key !in touched || s.id in deleted) continue
+            val point = edits[s.id]?.after?.let { Point(LocalDate.parse(it.date), BigDecimal(it.value), it.quantity?.let(::BigDecimal)) }
+                ?: Point(s.date, s.value, s.quantity)
+            points.getOrPut(key) { mutableListOf() } += point
         }
         for (t in storedTransactions) {
             val key = Key(t.productId, null)
@@ -98,10 +104,20 @@ object Reconcile {
         return points to flows
     }
 
-    /** Checks only the balances staged in [changes]. */
+    /**
+     * Checks the balances staged in [changes]: new ones, corrected ones, and the next balance after
+     * each corrected or removed one, since that is checked against it.
+     */
     fun checkStaged(changes: ChangeSet, storedSnapshots: List<SnapshotEntity>, storedTransactions: List<TransactionEntity>): List<Finding> {
         val (points, flows) = inputs(changes, storedSnapshots, storedTransactions)
-        val only = changes.snapshots.map { Key(it.product.id, it.product.ref) to LocalDate.parse(it.date) }.toSet()
+        val corrected = changes.snapshotEdits.flatMap { listOf(it.before, it.after) } + changes.snapshotDeletions.map { it.before }
+        val following = corrected.mapNotNull { r ->
+            val key = Key(r.productId, null)
+            val date = LocalDate.parse(r.date)
+            points[key]?.map { it.date }?.filter { it > date }?.minOrNull()?.let { key to it }
+        }
+        val only = changes.snapshots.map { Key(it.product.id, it.product.ref) to LocalDate.parse(it.date) }.toSet() +
+            changes.snapshotEdits.map { Key(it.after.productId, null) to LocalDate.parse(it.after.date) } + following
         return check(points, flows, only)
     }
 

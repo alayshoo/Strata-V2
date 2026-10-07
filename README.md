@@ -26,6 +26,7 @@ Import ── tags every row the assistant wrote, so it can be undone as a unit
 
 - **Recorded balances are anchors**: exact on their own dates. Transactions fill the history between them (the last balance plus flows since; before the first balance, the next balance minus flows in between). Unit holdings roll on units and are valued at the latest known price from balances and trades.
 - **Balances are reconciled against transactions**: a staged balance that disagrees with its flows (value for cash, units for securities) is returned to the assistant as a mismatch and shown on the review card, and stored mismatches are flagged on the product page.
+- **Recorded balances can be corrected from Chat**: spot a wrong balance in a chart and ask the assistant to fix it. The correction (or removal) lands on the review card showing the recorded and the corrected value, is checked against the transactions like any staged balance, and is written only when you tap Apply. Undoing that import puts the old balance back.
 - Transaction kinds: expense, income, transfer, trade, dividend, interest, fee. Transfer and trade legs share a `transferGroup`, so moving money between your own accounts never counts as spending.
 - Amounts are exact decimals in the product's own currency. Totals are converted to EUR at chart time with ECB reference rates (via [Frankfurter](https://frankfurter.dev)); requests contain only currency codes and dates.
 
@@ -45,6 +46,7 @@ Import ── tags every row the assistant wrote, so it can be undone as a unit
 | `list_products`, `get_snapshots`, `get_transactions` | `stage_snapshots`, `stage_transactions` |
 | `find_transfer_candidates`, `get_portfolio`, `get_spending_summary` | `link_transfer`, `get_staged_changes`, `clear_staged_changes` |
 | | `update_staged`, `remove_staged` (correct single staged rows by their staged id) |
+| | `edit_recorded_snapshots`, `delete_recorded_snapshots` (correct or remove balances already recorded) |
 | `sum_transactions` (exact totals, recorded and staged), `calculate` (exact decimal arithmetic) | |
 
 Every argument is validated: ids must exist, dates use ISO format and can't be in the future, decimals use a dot, and categories must match the transaction kind. Likely duplicates are skipped and reported back to the model.
