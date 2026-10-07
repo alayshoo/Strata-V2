@@ -68,7 +68,7 @@ data class DashboardState(
 fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = LocalDate.now()): DashboardState {
     val liabilityIds = input.assetClasses.filter { it.isLiability }.map { it.id }.toSet()
     val valuator = Valuator(
-        input.products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
+        input.products.map { ValuedProduct(it.id, it.assetClassId, it.currency, it.sourceId) },
         input.snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
         input.fx,
         input.transactions.map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },

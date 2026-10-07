@@ -117,7 +117,7 @@ fun sourceHistory(data: ExplorerData, sourceId: Long, range: TimeRange, today: L
 
     val liabilityIds = data.assetClasses.filter { it.isLiability }.map { it.id }.toSet()
     val valuator = Valuator(
-        products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
+        products.map { ValuedProduct(it.id, it.assetClassId, it.currency, it.sourceId) },
         snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
         data.fx,
         transactions.map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },

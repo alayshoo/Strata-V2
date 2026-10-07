@@ -188,7 +188,7 @@ object ToolSpecs {
                             "spending_category_id" to prop("integer", "Only for expense and income."),
                             "transfer_key" to prop("string", "Same key on both legs staged now to link them."),
                             "link_to_transaction_id" to prop("integer", "Existing transaction id that is the other leg."),
-                            "quantity" to prop("string", "Units bought (+) or sold (−) on a trade's security leg."),
+                            "quantity" to prop("string", "Units bought (+) or sold (−) on a trade's security leg; its amount has the same sign."),
                             "fx_rate" to prop("string", "Rate the institution applied, units of this currency per 1 EUR."),
                             "allow_duplicate" to prop("boolean", "Stage even if an identical transaction exists."),
                         ),
@@ -483,7 +483,7 @@ class ToolExecutor(
         val classes = db.setupDao().assetClasses()
         val snapshots = db.backupDao().snapshots()
         val valuator = Valuator(
-            products.map { ValuedProduct(it.id, it.assetClassId, it.currency) },
+            products.map { ValuedProduct(it.id, it.assetClassId, it.currency, it.sourceId) },
             snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
             fxTable(),
             db.backupDao().transactions().map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
@@ -641,6 +641,22 @@ class ToolExecutor(
         }
         val linkId = item.long("link_to_transaction_id")
         if (linkId != null && db.ledgerDao().transaction(linkId) == null) throw ToolError("$at: transaction $linkId does not exist")
+        val quantity = item.decimal("quantity")?.takeIf { it.signum() != 0 }
+        if (quantity != null) {
+            if (amount.signum() != 0 && amount.signum() != quantity.signum()) throw ToolError(
+                "$at: quantity and amount have opposite signs. On a trade's security leg a buy adds units and value (both positive) " +
+                    "and a sale removes both (both negative); the cash leg carries the opposite amount and no quantity. " +
+                    "A split or spin-off moves units on the security's own product with amount 0"
+            )
+            // A product whose balances are recorded without units holds cash; units there would be valued as a holding.
+            val productId = pointer.id
+            if (productId != null) {
+                val balances = db.ledgerDao().snapshotsFor(productId, LocalDate.of(1900, 1, 1), today)
+                if (balances.isNotEmpty() && balances.none { it.quantity != null }) throw ToolError(
+                    "$at: product $productId holds cash (its balances carry no units), so it takes no quantity; put the units on the security's own product"
+                )
+            }
+        }
         return NewTransaction(
             product = pointer, date = date.toString(), amount = amount.toPlainString(), description = item.string("description")?.trim().orEmpty(),
             counterparty = item.string("counterparty").orEmpty(), kind = kind.name, spendingCategoryId = categoryId,

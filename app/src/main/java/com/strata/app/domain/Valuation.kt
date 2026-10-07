@@ -75,7 +75,8 @@ class FxTable(rates: Map<String, List<Pair<LocalDate, BigDecimal>>>) {
     }
 }
 
-data class ValuedProduct(val id: Long, val assetClassId: Long, val currency: String)
+/** [sourceId] places the product at its institution, whose history bounds holdings bought before it. */
+data class ValuedProduct(val id: Long, val assetClassId: Long, val currency: String, val sourceId: Long? = null)
 data class ValuePoint(
     val productId: Long,
     val date: LocalDate,
@@ -92,9 +93,15 @@ data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDe
  * - before the first balance: the next balance minus the flows in between;
  * - before a product's first record of any kind: nothing.
  *
- * Products that hold units (any snapshot or flow carries a quantity) are rolled on units and
- * valued at the latest known price per unit in the product's currency: a snapshot's value divided
- * by its units, or a trade's amount divided by its units.
+ * Products that hold units (a snapshot carries a quantity, or there are no snapshots and a flow
+ * does) are rolled on units and valued at the latest known price per unit in the product's
+ * currency: a snapshot's value divided by its units, or a trade's amount divided by its units.
+ * A product whose balances never carry units is cash, whatever quantities its flows carry.
+ *
+ * A holding can't go below zero units. One sold before the ledger saw it bought held at least
+ * what was sold: with no balance in units to anchor it, it opens with the least that keeps its
+ * units at or above zero. A holding that opens with units was bought before its first transaction
+ * on record, so it is shown from the first transaction at its institution, not just its own.
  */
 class Valuator(
     products: List<ValuedProduct>,
@@ -121,6 +128,10 @@ class Valuator(
         }
         fun amountThrough(date: LocalDate): BigDecimal = indexThrough(date).let { if (it < 0) BigDecimal.ZERO else cumAmount[it] }
         fun unitsThrough(date: LocalDate): BigDecimal = indexThrough(date).let { if (it < 0) BigDecimal.ZERO else cumUnits[it] }
+
+        /** The fewest units held at the end of any day, starting from none. */
+        fun lowestUnits(): BigDecimal =
+            cumUnits.filterIndexed { i, _ -> i == dates.lastIndex || dates[i + 1] != dates[i] }.fold(BigDecimal.ZERO, BigDecimal::min)
     }
 
     private val ledgers: Map<Long, Ledger> = flows.filter { it.productId in this.products }.groupBy { it.productId }
@@ -139,14 +150,36 @@ class Valuator(
             Ledger(sorted.map { it.date }, cumA, cumU)
         }
 
+    private val unitBased: Set<Long> = buildSet {
+        history.forEach { (id, list) -> if (list.any { it.quantity != null }) add(id) }
+        flows.forEach { if (it.productId !in history && it.quantity != null && it.quantity.signum() != 0) add(it.productId) }
+    }
+
+    /** Units held before the first flow by holdings with no balance in units, where flows alone would go below zero. */
+    private val openingUnits: Map<Long, BigDecimal> = buildMap {
+        for ((id, ledger) in ledgers) {
+            if (id !in unitBased || history[id].orEmpty().any { it.quantity != null }) continue
+            val lowest = ledger.lowestUnits()
+            if (lowest.signum() < 0) put(id, lowest.negate())
+        }
+    }
+
     private val firstSeen: Map<Long, LocalDate> = buildMap {
         for ((id, list) in history) put(id, list.first().date)
         for ((id, l) in ledgers) put(id, minOf(get(id) ?: l.dates.first(), l.dates.first()))
-    }
-
-    private val unitBased: Set<Long> = buildSet {
-        history.forEach { (id, list) -> if (list.any { it.quantity != null }) add(id) }
-        flows.forEach { if (it.quantity != null && it.quantity.signum() != 0) add(it.productId) }
+        // A holding that already had units before its first record goes back to its institution's first transaction.
+        val sourceStart = HashMap<Long, LocalDate>()
+        for ((id, l) in ledgers) {
+            val source = this@Valuator.products[id]?.sourceId ?: continue
+            sourceStart.merge(source, l.dates.first()) { a, b -> minOf(a, b) }
+        }
+        for (id in unitBased) {
+            val first = get(id) ?: continue
+            val start = this@Valuator.products[id]?.sourceId?.let(sourceStart::get) ?: continue
+            if (start >= first) continue
+            val before = anchored(id, first.minusDays(1), ledgers[id], units = true, opening = openingUnits[id])
+            if (before != null && before.signum() > 0) put(id, start)
+        }
     }
 
     /** Known unit prices per product, sorted by date. */
@@ -197,7 +230,7 @@ class Valuator(
         if (date < first) return null
         val ledger = ledgers[productId]
         return if (productId in unitBased) {
-            val units = anchored(productId, date, ledger, units = true) ?: return null
+            val units = anchored(productId, date, ledger, units = true, opening = openingUnits[productId]) ?: return null
             if (units.signum() == 0) return BigDecimal.ZERO
             val price = priceAt(productId, date) ?: return null
             units.multiply(price, MathContext.DECIMAL64)
@@ -206,7 +239,7 @@ class Valuator(
         }
     }
 
-    private fun anchored(productId: Long, date: LocalDate, ledger: Ledger?, units: Boolean): BigDecimal? {
+    private fun anchored(productId: Long, date: LocalDate, ledger: Ledger?, units: Boolean, opening: BigDecimal? = null): BigDecimal? {
         fun through(d: LocalDate) = if (ledger == null) BigDecimal.ZERO else if (units) ledger.unitsThrough(d) else ledger.amountThrough(d)
         fun measure(p: ValuePoint): BigDecimal? = if (units) p.quantity else p.value
         val previous = latestOnOrBefore(productId, date)
@@ -216,7 +249,7 @@ class Valuator(
         }
         val next = firstAfter(productId, date)
         if (next != null) measure(next)?.let { return it - (through(next.date) - through(date)) }
-        return if (ledger != null) through(date) else null
+        return if (ledger != null) through(date) + (opening ?: BigDecimal.ZERO) else null
     }
 
     private fun priceAt(productId: Long, date: LocalDate): BigDecimal? {

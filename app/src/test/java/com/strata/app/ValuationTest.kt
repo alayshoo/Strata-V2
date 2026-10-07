@@ -84,6 +84,60 @@ class ValuationTest {
         assertTrue(before.toString(), before > bd("400") && before < bd("600"))
     }
 
+    @Test fun holdingsSoldBeforeTheLedgerSawThemBoughtNeverGoNegative() {
+        // A broker's history starts on 1 November; a fund bought before then is sold on the 7th.
+        val v = Valuator(
+            listOf(ValuedProduct(1, 1, "EUR", sourceId = 3), ValuedProduct(2, 20, "EUR", sourceId = 3)),
+            listOf(ValuePoint(1, d("2025-11-30"), bd("400"))),
+            fx,
+            listOf(
+                ValueFlow(1, d("2025-11-01"), bd("100")),
+                ValueFlow(2, d("2025-11-07"), bd("-312.97"), bd("-2.8454345")),
+                ValueFlow(1, d("2025-11-07"), bd("312.97")),
+            ),
+        )
+        // It held what was sold from the start of the broker's history, and nothing after the sale.
+        assertNull(v.valueAt(2, d("2025-10-31")))
+        assertEquals(0, bd("312.97").compareTo(v.valueAt(2, d("2025-11-01"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+        assertEquals(0, BigDecimal.ZERO.compareTo(v.valueAt(2, d("2025-11-07"))))
+        assertEquals(0, BigDecimal.ZERO.compareTo(v.valueAt(2, d("2026-10-07"))))
+        // Selling it moves value into cash; the total stays put.
+        val before = v.byAssetClass(d("2025-11-06")).values.fold(BigDecimal.ZERO, BigDecimal::add)
+        val after = v.byAssetClass(d("2025-11-07")).values.fold(BigDecimal.ZERO, BigDecimal::add)
+        assertEquals(0, before.setScale(2, java.math.RoundingMode.HALF_UP).compareTo(after.setScale(2, java.math.RoundingMode.HALF_UP)))
+        assertEquals(d("2025-11-01"), v.firstRecord(2))
+    }
+
+    @Test fun anchoredHoldingsSoldDownBeforeTheirFirstBalanceStartWithTheirInstitution() {
+        // 0.16 sold on 3 November, 0.0685 bought back in January, the first balance in February.
+        val v = Valuator(
+            listOf(ValuedProduct(1, 1, "EUR", sourceId = 3), ValuedProduct(2, 20, "EUR", sourceId = 3)),
+            listOf(ValuePoint(2, d("2026-02-28"), bd("70"), bd("0.0685"))),
+            fx,
+            listOf(
+                ValueFlow(1, d("2025-11-01"), bd("100")),
+                ValueFlow(2, d("2025-11-03"), bd("-146.48"), bd("-0.16")),
+                ValueFlow(2, d("2026-01-12"), bd("67.06"), bd("0.0685")),
+            ),
+        )
+        assertEquals(d("2025-11-01"), v.firstRecord(2))
+        assertEquals(0, bd("146.48").compareTo(v.valueAt(2, d("2025-11-02"))!!.setScale(2, java.math.RoundingMode.HALF_UP)))
+        assertEquals(0, BigDecimal.ZERO.compareTo(v.valueAt(2, d("2025-12-01"))))
+    }
+
+    @Test fun cashWithStrayUnitsIsValuedOnItsBalances() {
+        // A split leg booked on the cash account carries units; its balances, in euros, still decide its value.
+        val v = Valuator(
+            listOf(ValuedProduct(1, 1, "EUR")),
+            listOf(ValuePoint(1, d("2025-11-30"), bd("500")), ValuePoint(1, d("2025-12-31"), bd("650"))),
+            fx,
+            listOf(ValueFlow(1, d("2025-12-15"), bd("150.02"), bd("-0.13848401"))),
+        )
+        assertTrue(!v.holdsUnits(1))
+        assertEquals(0, bd("650.02").compareTo(v.valueAt(1, d("2025-12-20"))))
+        assertEquals(0, bd("650").compareTo(v.valueAt(1, d("2026-10-07"))))
+    }
+
     @Test fun convertsWithRateOnOrBeforeDate() {
         assertEquals(0, bd("100").compareTo(fx.toEur(bd("110"), "USD", d("2026-01-15"))))
         // Weekend after a rate change uses the newest earlier rate.
