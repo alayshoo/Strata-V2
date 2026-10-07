@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import com.strata.app.ai.RunState
 import com.strata.app.data.db.ChatEntity
 import com.strata.app.data.db.ProposalStatus
+import com.strata.app.domain.MoneyFormat
 import com.strata.app.ui.components.EmptyState
 import com.strata.app.ui.components.MarkdownText
 import com.strata.app.ui.components.ScreenTitle
@@ -146,7 +147,8 @@ private fun ChatRow(chat: ChatEntity, run: RunState?, onOpen: () -> Unit, onDele
             Column(Modifier.weight(1f)) {
                 Text(chat.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    if (run?.busy == true) run.progress.orEmpty() else relativeTime(chat.updatedAt),
+                    if (run?.busy == true) run.progress.orEmpty()
+                    else listOfNotNull(relativeTime(chat.updatedAt), chat.costUsd.takeIf { it > 0 }?.let(MoneyFormat::usage)).joinToString("  ·  "),
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (run?.busy == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -177,6 +179,8 @@ data class ConversationUi(
     val run: RunState = RunState(),
     val hasApiKey: Boolean = true,
     val model: String = "",
+    /** What this chat's model requests have cost so far, in US dollars. */
+    val costUsd: Double = 0.0,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -216,7 +220,8 @@ fun ConversationScreen(
                 title = {
                     Column {
                         Text(ui.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (ui.model.isNotEmpty()) Text(ui.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        val subtitle = listOfNotNull(ui.model.ifEmpty { null }, ui.costUsd.takeIf { it > 0 }?.let(MoneyFormat::usage)).joinToString("  ·  ")
+                        if (subtitle.isNotEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back") } },

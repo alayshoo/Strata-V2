@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.strata.app.ai.RunState
+import com.strata.app.domain.MoneyFormat
 import com.strata.app.ui.theme.Figures
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -74,6 +75,7 @@ fun roundSummary(r: TraceRound): String = listOfNotNull(
     r.durationMs?.let(::formatDuration),
     r.promptTokens?.let { "${tokens(it)} in" },
     r.completionTokens?.let { "${tokens(it)} out" },
+    r.cost?.let(MoneyFormat::usage),
 ).joinToString("  ·  ").ifEmpty { "Round" }
 
 /** Plain-text dump of a turn, for pasting into a bug report or another chat. */
@@ -104,6 +106,7 @@ fun ActivityCard(item: ChatItem.Activity, initiallyExpanded: Boolean = false) {
         if (item.rounds.isNotEmpty()) add("${item.rounds.size} round${if (item.rounds.size == 1) "" else "s"}")
         if (item.callCount > 0) add("${item.callCount} tool call${if (item.callCount == 1) "" else "s"}")
         if (item.totalMs > 0) add(formatDuration(item.totalMs))
+        item.totalCost?.let { add(MoneyFormat.usage(it)) }
         if (hasErrors) add("${item.errorCount} error${if (item.errorCount == 1) "" else "s"}")
     }.joinToString("  ·  ")
 
@@ -150,6 +153,7 @@ private fun RoundCard(r: TraceRound, key: String, expandAll: Boolean) {
         r.durationMs?.let(::formatDuration),
         r.promptTokens?.let { "${tokens(it)} in" },
         r.completionTokens?.let { "${tokens(it)} out" },
+        r.cost?.let(MoneyFormat::usage),
     ).joinToString("  ·  ")
     Surface(
         shape = MaterialTheme.shapes.medium,

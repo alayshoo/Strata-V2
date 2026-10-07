@@ -51,7 +51,7 @@ class ConversationViewModel(private val session: Session, private val chatId: Lo
         session.settings.apiKey,
         session.settings.model,
     ) { chat, items, run, key, model ->
-        ConversationUi(chat?.title ?: "Chat", items, run, hasApiKey = !key.isNullOrBlank(), model = model)
+        ConversationUi(chat?.title ?: "Chat", items, run, hasApiKey = !key.isNullOrBlank(), model = model, costUsd = chat?.costUsd ?: 0.0)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ConversationUi("", emptyList()))
 
     fun addFile(uri: Uri, name: String) = _pending.update { it + PendingFile(uri, name) }

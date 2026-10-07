@@ -36,6 +36,8 @@ data class AssistantReply(
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
     val finishReason: String? = null,
+    /** What the request cost in OpenRouter credits (US dollars), when reported. */
+    val cost: Double? = null,
 )
 
 data class ModelInfo(val id: String, val name: String, val promptPricePerMillion: Double?, val contextLength: Int?)
@@ -61,6 +63,8 @@ class OpenRouterClient(private val http: OkHttpClient) {
             put("tools", tools)
             put("temperature", 0.2)
             if (privateProvidersOnly) put("provider", buildJsonObject { put("data_collection", "deny") })
+            // Asks for usage accounting, so the response says what the request cost.
+            put("usage", buildJsonObject { put("include", true) })
         }
         val root = post("chat/completions", apiKey, body)
         val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
@@ -90,6 +94,7 @@ class OpenRouterClient(private val http: OkHttpClient) {
             promptTokens = (usage?.get("prompt_tokens") as? JsonPrimitive)?.contentOrNull?.toIntOrNull(),
             completionTokens = (usage?.get("completion_tokens") as? JsonPrimitive)?.contentOrNull?.toIntOrNull(),
             finishReason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull,
+            cost = (usage?.get("cost") as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull(),
         )
     }
 

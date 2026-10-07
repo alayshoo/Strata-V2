@@ -2,6 +2,7 @@
 
 package com.strata.app.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -168,6 +169,8 @@ data class ChatEntity(
     val title: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** What the model requests in this chat have cost so far, in US dollars as OpenRouter reports it. */
+    @ColumnInfo(defaultValue = "0") val costUsd: Double = 0.0,
 )
 
 @Entity(

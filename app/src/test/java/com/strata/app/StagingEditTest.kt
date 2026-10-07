@@ -153,6 +153,7 @@ class StagingEditTest {
     }.build()
 
     private fun toolReply(name: String, arguments: String) = buildJsonObject {
+        putJsonObject("usage") { put("cost", 0.0125) }
         putJsonArray("choices") {
             addJsonObject {
                 putJsonObject("message") {
@@ -169,6 +170,7 @@ class StagingEditTest {
     }.toString()
 
     private fun textReply(text: String) = buildJsonObject {
+        putJsonObject("usage") { put("cost", 0.0125) }
         putJsonArray("choices") { addJsonObject { putJsonObject("message") { put("role", "assistant"); put("content", text) } } }
     }.toString()
 
@@ -199,5 +201,8 @@ class StagingEditTest {
         replies += textReply("Your groceries were 63.18.")
         agent.send(chatId, "How much were groceries?", emptyList()) {}
         assertEquals(listOf(ProposalStatus.SUPERSEDED, ProposalStatus.PENDING), cards().map { it.proposalStatus })
+
+        // Every request's reported cost adds up on the chat.
+        assertEquals(5 * 0.0125, db.chatDao().chat(chatId)!!.costUsd, 1e-9)
     }
 }

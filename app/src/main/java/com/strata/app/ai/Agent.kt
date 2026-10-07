@@ -36,6 +36,8 @@ data class RoundTrace(
     val completionTokens: Int? = null,
     val reasoning: String? = null,
     val finishReason: String? = null,
+    /** US dollars, as OpenRouter reported it. */
+    val cost: Double? = null,
 )
 
 /**
@@ -96,7 +98,9 @@ class Agent(
                     completionTokens = reply.completionTokens,
                     reasoning = reply.reasoning,
                     finishReason = reply.finishReason,
+                    cost = reply.cost,
                 )
+                reply.cost?.let { chatDao.addCost(chatId, it) }
                 if (reply.toolCalls.isEmpty()) {
                     finish(chatId, reply.content.orEmpty(), executor.staged, draft, trace)
                     return
