@@ -36,6 +36,8 @@ data class RoundTrace(
     val completionTokens: Int? = null,
     val reasoning: String? = null,
     val finishReason: String? = null,
+    /** US dollars, as OpenRouter reported it. */
+    val cost: Double? = null,
 )
 
 /**
@@ -70,8 +72,14 @@ class Agent(
             chatDao.updateChat(chat.copy(title = title, updatedAt = System.currentTimeMillis()))
         }
 
+        // A card still waiting for review carries into this turn, so the model can correct single items in it.
+        val carried = chatDao.messages(chatId).lastOrNull { it.proposalStatus == ProposalStatus.PENDING && it.proposalJson != null }
+        val carriedChanges = carried?.proposalJson?.let { runCatching { json.decodeFromString(ChangeSet.serializer(), it) }.getOrNull() }
         val executor = ToolExecutor(db, fxTable)
-        executor.reset(ChangeSet(fileNames = attachments.map { it.fileName }))
+        executor.reset(
+            (carriedChanges ?: ChangeSet()).let { it.copy(fileNames = (it.fileNames + attachments.map { a -> a.fileName }).distinct()) }
+        )
+        val draft = Draft(carried?.id?.takeIf { carriedChanges != null }, executor.staged)
         val history = buildHistory(chatId, currentImages = userMessageId to attachments.flatMap { it.images })
         val messages = history.toMutableList()
 
@@ -90,9 +98,11 @@ class Agent(
                     completionTokens = reply.completionTokens,
                     reasoning = reply.reasoning,
                     finishReason = reply.finishReason,
+                    cost = reply.cost,
                 )
+                reply.cost?.let { chatDao.addCost(chatId, it) }
                 if (reply.toolCalls.isEmpty()) {
-                    finish(chatId, reply.content.orEmpty(), executor.staged, trace)
+                    finish(chatId, reply.content.orEmpty(), executor.staged, draft, trace)
                     return
                 }
                 // Tool calls and their results are written together so a stop never leaves
@@ -113,25 +123,36 @@ class Agent(
                     }
                 }
             }
-            finish(chatId, "I stopped after $MAX_ROUNDS rounds without finishing. Here is what I staged so far.", executor.staged, null)
+            finish(chatId, "I stopped after $MAX_ROUNDS rounds without finishing. Here is what I staged so far.", executor.staged, draft, null)
         } catch (e: CancellationException) {
             withContext(NonCancellable) {
-                finish(chatId, STOPPED_MESSAGE + if (executor.staged.isEmpty) "" else " What was staged before that is below.", executor.staged, null)
+                val changed = executor.staged != draft.initial
+                finish(chatId, STOPPED_MESSAGE + if (executor.staged.isEmpty || !changed) "" else " What was staged before that is below.", executor.staged, draft, null)
             }
             throw e
         } catch (e: Exception) {
             // A timeout or provider error should not throw away batches already staged in this turn.
-            if (!executor.staged.isEmpty) {
+            if (!executor.staged.isEmpty && executor.staged != draft.initial) {
                 withContext(NonCancellable) {
-                    finish(chatId, "The model stopped responding (${e.message ?: "error"}). Here is what was staged before that; you can apply it and ask me to continue.", executor.staged, null)
+                    finish(chatId, "The model stopped responding (${e.message ?: "error"}). Here is what was staged before that; you can apply it and ask me to continue.", executor.staged, draft, null)
                 }
             }
             throw e
         }
     }
 
-    private suspend fun finish(chatId: Long, content: String, staged: ChangeSet, trace: RoundTrace?) {
-        val proposal = staged.takeUnless { it.isEmpty }
+    /** The card a turn started from: the carried-over pending card, if any, and what was staged at the start. */
+    private class Draft(val carriedMessageId: Long?, val initial: ChangeSet)
+
+    private suspend fun finish(chatId: Long, content: String, staged: ChangeSet, draft: Draft, trace: RoundTrace?) {
+        // An untouched carried card stays where it is; a changed one is replaced by the new card.
+        val changed = staged != draft.initial
+        val proposal = staged.takeUnless { it.isEmpty || !changed }
+        if (changed) draft.carriedMessageId?.let { id ->
+            chatDao.message(id)?.takeIf { it.proposalStatus == ProposalStatus.PENDING }?.let {
+                chatDao.updateMessage(it.copy(proposalStatus = ProposalStatus.SUPERSEDED))
+            }
+        }
         chatDao.insertMessage(
             MessageEntity(
                 chatId = chatId,
@@ -157,7 +178,9 @@ class Agent(
                         ProposalStatus.APPLIED -> "\n\n[The user applied the staged changes from this turn.]"
                         ProposalStatus.DISCARDED -> "\n\n[The user discarded the staged changes from this turn.]"
                         ProposalStatus.UNDONE -> "\n\n[The user applied, then undid, the staged changes from this turn.]"
-                        ProposalStatus.PENDING -> "\n\n[The staged changes from this turn are still waiting for review.]"
+                        ProposalStatus.PENDING -> "\n\n[The staged changes from this turn are still waiting for review. They carry into your next turn: " +
+                            "get_staged_changes lists them with staged ids, and update_staged or remove_staged correct single items.]"
+                        ProposalStatus.SUPERSEDED -> "\n\n[The staged changes from this turn were carried into a later turn and replaced by its card.]"
                         null -> ""
                     }
                     add(assistantJson((message.content + note).ifBlank { null }, calls))
@@ -249,7 +272,7 @@ class Agent(
               account from its first movement, the closing cash balance is sum_amount from sum_transactions for that product;
               for a security, the units held are sum_quantity. Say in the reply that you derived it.
             - Staging tools return "checks". A MISMATCH means a balance disagrees with its transactions. Never ignore it: correct
-              what you staged (clear_staged_changes and redo if needed) or tell the user plainly why they differ.
+              the items involved with update_staged or remove_staged, or tell the user plainly why they differ.
 
             Time and size limits
             - Each of your responses must finish within about 5 minutes or it is cut off and lost. A tool call with a long list
@@ -265,6 +288,10 @@ class Agent(
             - Start by reading the lists and products you need. Never guess ids.
             - Before staging, check what is already recorded for that product and period to avoid duplicates.
             - Writes are only staged. The user reviews them on a card and taps Apply. Each of your turns produces at most one card.
+            - Every staged item has a staged_id. A card still waiting for review carries into your next turn, and anything you
+              stage then is added to it. When the user asks for corrections, call get_staged_changes (filtered to the product
+              or dates involved), then fix only the affected items with update_staged or remove_staged. Never clear and restage
+              everything to fix a few items; clear_staged_changes is only for starting over completely.
             - Record a closing balance snapshot for every product a statement covers, at the statement end date.
             - Use '.' as the decimal separator and plain digits, e.g. "-1520.37".
             - If something is ambiguous (which product, which category), stage what is clear and ask about the rest.

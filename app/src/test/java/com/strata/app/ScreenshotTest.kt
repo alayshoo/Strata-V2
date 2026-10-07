@@ -27,6 +27,7 @@ import com.strata.app.domain.TimeRange
 import com.strata.app.domain.buildDashboard
 import com.strata.app.ui.StrataNavigationBar
 import com.strata.app.ui.TopDestination
+import com.strata.app.ui.chat.ChatItem
 import com.strata.app.ui.chat.ChatListScreen
 import com.strata.app.ui.chat.ConversationScreen
 import com.strata.app.ui.chat.ConversationUi
@@ -39,6 +40,8 @@ import com.strata.app.ui.explorer.ExplorerData
 import com.strata.app.ui.explorer.ExplorerScreen
 import com.strata.app.ui.explorer.ExplorerTab
 import com.strata.app.ui.explorer.ProductDetailScreen
+import com.strata.app.ui.explorer.SourceDetailScreen
+import com.strata.app.ui.explorer.TxFilter
 import com.strata.app.ui.lock.LockScreen
 import com.strata.app.ui.lock.LockUi
 import com.strata.app.ui.setup.AiSettingsUi
@@ -128,9 +131,9 @@ class ScreenshotTest(private val dark: Boolean) {
         WithNav(TopDestination.CHAT) {
             ChatListScreen(
                 listOf(
-                    ChatEntity(3, "September statement from Millennium", now - 3_600_000, now - 3_600_000),
-                    ChatEntity(2, "Trade Republic Q3 report", now - 86_400_000 * 2, now - 86_400_000 * 2),
-                    ChatEntity(1, "How much did I spend on dining since June?", now - 86_400_000 * 9, now - 86_400_000 * 9),
+                    ChatEntity(3, "September statement from Millennium", now - 3_600_000, now - 3_600_000, costUsd = 0.2548),
+                    ChatEntity(2, "Trade Republic Q3 report", now - 86_400_000 * 2, now - 86_400_000 * 2, costUsd = 0.4821),
+                    ChatEntity(1, "How much did I spend on dining since June?", now - 86_400_000 * 9, now - 86_400_000 * 9, costUsd = 0.0062),
                 ),
                 emptyMap(), {}, {}, {}, contentPadding = it,
             )
@@ -158,15 +161,25 @@ class ScreenshotTest(private val dark: Boolean) {
     }
 
     @Test fun holdings() = shoot("08-data-holdings", tall = 1300) {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it) }
     }
 
     @Test fun transactions() = shoot("09-data-transactions") {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS) }
+    }
+
+    @Test fun transactionsByCategory() = shoot("17-data-spending-categories") {
+        WithNav(TopDestination.DATA) {
+            ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.TRANSACTIONS, initialFilter = TxFilter.SPENDING)
+        }
+    }
+
+    @Test fun institution() = shoot("18-institution-detail", tall = 1500) {
+        SourceDetailScreen(2, explorerData, {}, {}, {}, {}, {}, initialRange = TimeRange.Y1, today = SampleData.today)
     }
 
     @Test fun imports() = shoot("10-data-imports") {
-        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.IMPORTS) }
+        WithNav(TopDestination.DATA) { ExplorerScreen(explorerData, {}, {}, {}, {}, {}, {}, contentPadding = it, initialTab = ExplorerTab.IMPORTS) }
     }
 
     @Test fun product() = shoot("11-product-detail") {
@@ -205,7 +218,7 @@ class ScreenshotTest(private val dark: Boolean) {
     }
 
     private fun trace(round: Int, ms: Long, inTokens: Int, outTokens: Int, reasoning: String?) =
-        Json.encodeToString(RoundTrace.serializer(), RoundTrace(round, "z-ai/glm-5.3-flash", ms, inTokens, outTokens, reasoning))
+        Json.encodeToString(RoundTrace.serializer(), RoundTrace(round, "z-ai/glm-5.3-flash", ms, inTokens, outTokens, reasoning, cost = (inTokens * 3 + outTokens * 15) / 1_000_000.0))
 
     private fun callsWith(name: String, escapedArgs: String) =
         """[{"id":"b0","type":"function","function":{"name":"$name","arguments":"$escapedArgs"}}]"""
@@ -254,7 +267,8 @@ class ScreenshotTest(private val dark: Boolean) {
         ).let { if (running) it.dropLast(1) else it }
         val attachments = listOf(AttachmentEntity(1, 1, "extrato_setembro_2026.pdf", "application/pdf", "", 3))
         val items = buildChatItems(messages, attachments, Lookup(SampleData.products, SampleData.sources, SampleData.categories))
-        return ConversationUi("September statement from Millennium", items, model = "anthropic/claude-sonnet-5.5")
+        val cost = items.filterIsInstance<ChatItem.Activity>().sumOf { it.totalCost ?: 0.0 }
+        return ConversationUi("September statement from Millennium", items, model = "anthropic/claude-sonnet-5.5", costUsd = cost)
     }
 
 }

@@ -166,7 +166,7 @@ private fun StrataStrip(state: DashboardState) {
     }
 }
 
-private fun rangePhrase(range: TimeRange) = when (range) {
+internal fun rangePhrase(range: TimeRange) = when (range) {
     TimeRange.ALL -> "since your first record"
     TimeRange.Y1 -> "over the last year"
     TimeRange.YTD -> "this year"

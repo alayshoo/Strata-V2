@@ -49,6 +49,13 @@ object MoneyFormat {
     private fun trim(v: Double): String =
         if (v >= 100 || v % 1.0 == 0.0) v.toLong().toString() else String.format(Locale.getDefault(), "%.1f", v)
 
+    /** Model usage in US dollars: cents normally, a tenth of a cent for single cheap requests. */
+    fun usage(usd: Double): String = when {
+        usd < 0.001 -> "<$0.001"
+        usd < 0.01 -> String.format(Locale.US, "$%.3f", usd)
+        else -> String.format(Locale.US, "$%.2f", usd)
+    }
+
     fun percent(ratio: Double): String = String.format(Locale.getDefault(), "%.1f%%", ratio * 100)
 
     fun quantity(q: BigDecimal): String = q.stripTrailingZeros().toPlainString()

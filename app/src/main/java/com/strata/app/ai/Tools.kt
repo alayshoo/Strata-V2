@@ -1,6 +1,7 @@
 package com.strata.app.ai
 
 import com.strata.app.data.db.FlowKind
+import com.strata.app.data.db.SpendingCategoryEntity
 import com.strata.app.data.db.StrataDatabase
 import com.strata.app.data.db.TxKind
 import com.strata.app.domain.FlowItem
@@ -15,6 +16,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
@@ -230,8 +232,56 @@ object ToolSpecs {
                 listOf("expression"),
             )
         )
-        add(tool("get_staged_changes", "Show everything staged so far in this turn, plus balance checks against the transactions."))
-        add(tool("clear_staged_changes", "Discard everything staged in this turn to start over."))
+        add(
+            tool(
+                "get_staged_changes",
+                "Everything staged so far, including a review card from an earlier turn that is still waiting, plus balance checks. " +
+                    "Each item has a staged_id and the same fields as the stage tool that created it. Filter by product and dates to keep it short.",
+                props(
+                    *productPointer,
+                    "from" to prop("string", "Only balances and transactions on or after this date, YYYY-MM-DD."),
+                    "to" to prop("string", "Only balances and transactions on or before this date, YYYY-MM-DD."),
+                ),
+            )
+        )
+        add(
+            tool(
+                "update_staged",
+                "Correct staged items in place by staged_id, leaving everything else as it is. In set, pass only the fields to change, " +
+                    "named as in the stage tool that created the item; null clears an optional field. Changing a transaction's kind " +
+                    "drops its spending category unless set also gives spending_category_id. A staged product's ref cannot change.",
+                props(
+                    "items" to arraySchema(
+                        props(
+                            "staged_id" to prop("integer", "staged_id from get_staged_changes or from the stage tool's result."),
+                            "set" to prop("object", "Fields to change, e.g. {\"amount\": \"-12.30\", \"spending_category_id\": 4}."),
+                        ),
+                        listOf("staged_id", "set"),
+                        "Corrections to make. If any is invalid, none is applied.",
+                    )
+                ),
+                listOf("items"),
+            )
+        )
+        add(
+            tool(
+                "remove_staged",
+                "Remove staged items by staged_id. Removing a staged product also removes the balances and transactions staged on it.",
+                props(
+                    "staged_ids" to buildJsonObject {
+                        put("type", "array")
+                        putJsonObject("items") { put("type", "integer") }
+                    }
+                ),
+                listOf("staged_ids"),
+            )
+        )
+        add(
+            tool(
+                "clear_staged_changes",
+                "Discard everything staged, including a carried-over review card, to start over. To fix a few items use update_staged or remove_staged instead.",
+            )
+        )
     }
 }
 
@@ -247,7 +297,7 @@ class ToolExecutor(
     var staged = ChangeSet()
         private set
 
-    fun reset(initial: ChangeSet = ChangeSet()) { staged = initial }
+    fun reset(initial: ChangeSet = ChangeSet()) { staged = initial.withIds() }
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -278,6 +328,8 @@ class ToolExecutor(
         "sum_transactions" -> "Added up transactions"
         "calculate" -> "Calculated"
         "get_staged_changes" -> "Reviewed staged changes"
+        "update_staged" -> "Corrected staged changes"
+        "remove_staged" -> "Removed staged changes"
         "clear_staged_changes" -> "Cleared staged changes"
         else -> name
     }
@@ -344,10 +396,10 @@ class ToolExecutor(
         "stage_transactions" -> stageTransactions(args)
         "link_transfer" -> {
             val ids = args["transaction_ids"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.longOrNull }.orEmpty()
-            if (ids.size < 2) throw ToolError("Provide at least two transaction ids")
-            ids.forEach { if (db.ledgerDao().transaction(it) == null) throw ToolError("Transaction $it does not exist") }
-            staged = staged.copy(links = staged.links + TransferLink(ids))
-            buildJsonObject { put("staged", "link of ${ids.joinToString()}") }
+            requireLinkable(ids, "")
+            val link = TransferLink(ids, newId())
+            staged = staged.copy(links = staged.links + link)
+            buildJsonObject { put("staged", "link of ${ids.joinToString()}"); put("staged_id", link.id) }
         }
         "sum_transactions" -> sumTransactions(args)
         "calculate" -> {
@@ -355,12 +407,12 @@ class ToolExecutor(
             val result = try { Calculator.evaluate(expression) } catch (e: Calculator.CalcError) { throw ToolError(e.message ?: "Invalid expression") }
             buildJsonObject { put("expression", expression); put("result", result.toPlainString()) }
         }
-        "get_staged_changes" -> buildJsonObject {
-            put("staged", json.parseToJsonElement(json.encodeToString(ChangeSet.serializer(), staged)))
-            checks()?.let { put("checks", it) }
-        }
+        "get_staged_changes" -> stagedChanges(args)
+        "update_staged" -> updateStaged(args)
+        "remove_staged" -> removeStaged(args)
         "clear_staged_changes" -> {
-            staged = ChangeSet(fileNames = staged.fileNames)
+            // Ids keep counting up so an id from before the clear never names a new item.
+            staged = ChangeSet(fileNames = staged.fileNames, nextId = staged.nextId)
             buildJsonObject { put("cleared", true) }
         }
         else -> throw ToolError("Unknown tool $name")
@@ -441,23 +493,14 @@ class ToolExecutor(
         }
     }
 
+    private fun newId(): Int = staged.nextId.also { staged = staged.copy(nextId = it + 1) }
+
     private suspend fun stageProduct(args: JsonObject): JsonObject {
         val ref = args.string("ref")?.takeIf { it.isNotBlank() } ?: throw ToolError("ref is required")
         if (staged.products.any { it.ref == ref }) throw ToolError("ref '$ref' is already used")
-        val sourceId = args.long("source_id") ?: throw ToolError("source_id is required")
-        val classId = args.long("asset_class_id") ?: throw ToolError("asset_class_id is required")
-        if (db.setupDao().sources().none { it.id == sourceId }) {
-            throw ToolError("Source $sourceId does not exist. Sources are created by the user in Setup; ask them to add it.")
-        }
-        if (db.setupDao().assetClasses().none { it.id == classId }) {
-            throw ToolError("Asset class $classId does not exist. Asset classes are created by the user in Setup.")
-        }
-        val name = args.string("name")?.trim()?.takeIf { it.isNotEmpty() } ?: throw ToolError("name is required")
-        val currency = currency(args.string("currency"))
-        val existing = db.ledgerDao().products().firstOrNull { it.sourceId == sourceId && it.name.equals(name, ignoreCase = true) }
-        if (existing != null) throw ToolError("Product '${existing.name}' already exists with id ${existing.id}; use it instead.")
-        staged = staged.copy(products = staged.products + NewProduct(ref, sourceId, classId, name, currency, args.string("identifier").orEmpty()))
-        return buildJsonObject { put("staged_product_ref", ref) }
+        val product = parseProduct(args, ref).copy(id = newId())
+        staged = staged.copy(products = staged.products + product)
+        return buildJsonObject { put("staged_product_ref", ref); put("staged_id", product.id) }
     }
 
     private suspend fun stageSnapshots(args: JsonObject): JsonObject {
@@ -465,26 +508,14 @@ class ToolExecutor(
         val accepted = mutableListOf<NewSnapshot>()
         val skipped = mutableListOf<String>()
         items.forEachIndexed { i, element ->
-            val item = element.jsonObject
-            val pointer = pointer(item, i)
-            val date = item.date("date") ?: throw ToolError("items[$i].date is required (YYYY-MM-DD)")
-            if (date > today.plusDays(1)) throw ToolError("items[$i].date $date is in the future")
-            val value = item.decimal("value") ?: throw ToolError("items[$i].value must be a decimal number")
-            val duplicateStaged = (staged.snapshots + accepted).any { it.product == pointer && it.date == date.toString() }
-            val duplicateStored = pointer.id != null && db.ledgerDao().snapshotOn(pointer.id, date) != null
-            if (duplicateStaged || duplicateStored) { skipped += "items[$i] (${date}): a balance for that day already exists"; return@forEachIndexed }
-            accepted += NewSnapshot(
-                product = pointer, date = date.toString(), value = value.toPlainString(),
-                quantity = item.decimal("quantity")?.toPlainString(), unitPrice = item.decimal("unit_price")?.toPlainString(),
-                note = item.string("note").orEmpty(),
-            )
+            val snapshot = parseSnapshot(element.jsonObject, "items[$i]")
+            val clash = snapshotClash(snapshot, staged.snapshots + accepted)
+            if (clash != null) { skipped += "items[$i] (${snapshot.date}): $clash"; return@forEachIndexed }
+            accepted += snapshot
         }
-        staged = staged.copy(snapshots = staged.snapshots + accepted)
-        return buildJsonObject {
-            put("staged", accepted.size)
-            if (skipped.isNotEmpty()) putJsonArray("skipped") { skipped.forEach { add(it) } }
-            checks()?.let { put("checks", it) }
-        }
+        val added = accepted.map { it.copy(id = newId()) }
+        staged = staged.copy(snapshots = staged.snapshots + added)
+        return stagedResult(added.map { it.id }, skipped)
     }
 
     private suspend fun stageTransactions(args: JsonObject): JsonObject {
@@ -494,42 +525,258 @@ class ToolExecutor(
         val skipped = mutableListOf<String>()
         items.forEachIndexed { i, element ->
             val item = element.jsonObject
-            val pointer = pointer(item, i)
-            val date = item.date("date") ?: throw ToolError("items[$i].date is required (YYYY-MM-DD)")
-            if (date > today.plusDays(1)) throw ToolError("items[$i].date $date is in the future")
-            val amount = item.decimal("amount") ?: throw ToolError("items[$i].amount must be a signed decimal")
-            val kind = parseKind(item.string("kind") ?: throw ToolError("items[$i].kind is required"))
-            val categoryId = item.long("spending_category_id")
-            if (categoryId != null) {
-                val category = categories[categoryId] ?: throw ToolError("items[$i]: spending category $categoryId does not exist")
-                val expected = if (kind == TxKind.INCOME) FlowKind.INCOME else FlowKind.EXPENSE
-                if (kind != TxKind.EXPENSE && kind != TxKind.INCOME) throw ToolError("items[$i]: only expense and income take a spending category")
-                if (category.kind != expected) throw ToolError("items[$i]: '${category.name}' is an ${category.kind.name.lowercase()} category but kind is ${kind.name.lowercase()}")
-            }
-            val linkId = item.long("link_to_transaction_id")
-            if (linkId != null && db.ledgerDao().transaction(linkId) == null) throw ToolError("items[$i]: transaction $linkId does not exist")
-            val description = item.string("description")?.trim().orEmpty()
-            if (pointer.id != null && item["allow_duplicate"]?.let { (it as? JsonPrimitive)?.booleanOrNull } != true) {
-                val dup = db.ledgerDao().transactions(pointer.id, date, date, null, 50).firstOrNull { it.amount.compareTo(amount) == 0 }
-                if (dup != null) { skipped += "items[$i]: looks like existing transaction ${dup.id} (${dup.description}); pass allow_duplicate if it is really new"; return@forEachIndexed }
-            }
-            accepted += NewTransaction(
-                product = pointer, date = date.toString(), amount = amount.toPlainString(), description = description,
-                counterparty = item.string("counterparty").orEmpty(), kind = kind.name, spendingCategoryId = categoryId,
-                transferKey = item.string("transfer_key"), linkToTransactionId = linkId,
-                quantity = item.decimal("quantity")?.toPlainString(), fxRate = item.decimal("fx_rate")?.toPlainString(),
-            )
+            val transaction = parseTransaction(item, "items[$i]", categories)
+            val clash = transactionClash(transaction, item)
+            if (clash != null) { skipped += "items[$i]: $clash"; return@forEachIndexed }
+            accepted += transaction
         }
-        staged = staged.copy(transactions = staged.transactions + accepted)
+        val added = accepted.map { it.copy(id = newId()) }
+        staged = staged.copy(transactions = staged.transactions + added)
+        return stagedResult(added.map { it.id }, skipped)
+    }
+
+    private suspend fun stagedResult(ids: List<Int>, skipped: List<String>) = buildJsonObject {
+        put("staged", ids.size)
+        if (ids.isNotEmpty()) putJsonArray("staged_ids") { ids.forEach { add(it) } }
+        if (skipped.isNotEmpty()) putJsonArray("skipped") { skipped.forEach { add(it) } }
+        checks()?.let { put("checks", it) }
+    }
+
+    private suspend fun parseProduct(args: JsonObject, ref: String, at: String = ""): NewProduct {
+        val sourceId = args.long("source_id") ?: throw ToolError("${at}source_id is required")
+        val classId = args.long("asset_class_id") ?: throw ToolError("${at}asset_class_id is required")
+        if (db.setupDao().sources().none { it.id == sourceId }) {
+            throw ToolError("${at}Source $sourceId does not exist. Sources are created by the user in Setup; ask them to add it.")
+        }
+        if (db.setupDao().assetClasses().none { it.id == classId }) {
+            throw ToolError("${at}Asset class $classId does not exist. Asset classes are created by the user in Setup.")
+        }
+        val name = args.string("name")?.trim()?.takeIf { it.isNotEmpty() } ?: throw ToolError("${at}name is required")
+        val currency = currency(args.string("currency"))
+        val existing = db.ledgerDao().products().firstOrNull { it.sourceId == sourceId && it.name.equals(name, ignoreCase = true) }
+        if (existing != null) throw ToolError("${at}Product '${existing.name}' already exists with id ${existing.id}; use it instead.")
+        return NewProduct(ref, sourceId, classId, name, currency, args.string("identifier").orEmpty())
+    }
+
+    private suspend fun parseSnapshot(item: JsonObject, at: String): NewSnapshot {
+        val pointer = pointer(item, at)
+        val date = item.date("date") ?: throw ToolError("$at.date is required (YYYY-MM-DD)")
+        if (date > today.plusDays(1)) throw ToolError("$at.date $date is in the future")
+        val value = item.decimal("value") ?: throw ToolError("$at.value must be a decimal number")
+        return NewSnapshot(
+            product = pointer, date = date.toString(), value = value.toPlainString(),
+            quantity = item.decimal("quantity")?.toPlainString(), unitPrice = item.decimal("unit_price")?.toPlainString(),
+            note = item.string("note").orEmpty(),
+        )
+    }
+
+    /** Why [snapshot] can't be staged next to [others], or null when it can. */
+    private suspend fun snapshotClash(snapshot: NewSnapshot, others: List<NewSnapshot>): String? {
+        val duplicateStaged = others.any { it.product == snapshot.product && it.date == snapshot.date }
+        val duplicateStored = snapshot.product.id != null && db.ledgerDao().snapshotOn(snapshot.product.id, LocalDate.parse(snapshot.date)) != null
+        return if (duplicateStaged || duplicateStored) "a balance for that day already exists" else null
+    }
+
+    private suspend fun parseTransaction(item: JsonObject, at: String, categories: Map<Long, SpendingCategoryEntity>): NewTransaction {
+        val pointer = pointer(item, at)
+        val date = item.date("date") ?: throw ToolError("$at.date is required (YYYY-MM-DD)")
+        if (date > today.plusDays(1)) throw ToolError("$at.date $date is in the future")
+        val amount = item.decimal("amount") ?: throw ToolError("$at.amount must be a signed decimal")
+        val kind = parseKind(item.string("kind") ?: throw ToolError("$at.kind is required"))
+        val categoryId = item.long("spending_category_id")
+        if (categoryId != null) {
+            val category = categories[categoryId] ?: throw ToolError("$at: spending category $categoryId does not exist")
+            val expected = if (kind == TxKind.INCOME) FlowKind.INCOME else FlowKind.EXPENSE
+            if (kind != TxKind.EXPENSE && kind != TxKind.INCOME) throw ToolError("$at: only expense and income take a spending category")
+            if (category.kind != expected) throw ToolError("$at: '${category.name}' is an ${category.kind.name.lowercase()} category but kind is ${kind.name.lowercase()}")
+        }
+        val linkId = item.long("link_to_transaction_id")
+        if (linkId != null && db.ledgerDao().transaction(linkId) == null) throw ToolError("$at: transaction $linkId does not exist")
+        return NewTransaction(
+            product = pointer, date = date.toString(), amount = amount.toPlainString(), description = item.string("description")?.trim().orEmpty(),
+            counterparty = item.string("counterparty").orEmpty(), kind = kind.name, spendingCategoryId = categoryId,
+            transferKey = item.string("transfer_key"), linkToTransactionId = linkId,
+            quantity = item.decimal("quantity")?.toPlainString(), fxRate = item.decimal("fx_rate")?.toPlainString(),
+        )
+    }
+
+    /** A recorded transaction that [transaction] looks like, unless [item] says it is really new. */
+    private suspend fun transactionClash(transaction: NewTransaction, item: JsonObject): String? {
+        val productId = transaction.product.id ?: return null
+        if (item["allow_duplicate"]?.let { (it as? JsonPrimitive)?.booleanOrNull } == true) return null
+        val date = LocalDate.parse(transaction.date)
+        val amount = BigDecimal(transaction.amount)
+        val dup = db.ledgerDao().transactions(productId, date, date, null, 50).firstOrNull { it.amount.compareTo(amount) == 0 } ?: return null
+        return "looks like existing transaction ${dup.id} (${dup.description}); pass allow_duplicate if it is really new"
+    }
+
+    private suspend fun requireLinkable(ids: List<Long>, at: String) {
+        if (ids.size < 2) throw ToolError("${at}Provide at least two transaction ids")
+        ids.forEach { if (db.ledgerDao().transaction(it) == null) throw ToolError("${at}Transaction $it does not exist") }
+    }
+
+    // ---------- Reviewing and correcting what is staged ----------
+
+    private suspend fun stagedChanges(args: JsonObject): JsonObject {
+        val pointer = args.long("product_id")?.let { ProductPointer(id = it) } ?: args.string("new_product_ref")?.let { ProductPointer(ref = it) }
+        val from = args.date("from")
+        val to = args.date("to")
+        fun keep(product: ProductPointer, date: String): Boolean {
+            if (pointer != null && product != pointer) return false
+            val d = LocalDate.parse(date)
+            return (from == null || d >= from) && (to == null || d <= to)
+        }
+        val snapshots = staged.snapshots.filter { keep(it.product, it.date) }
+        val transactions = staged.transactions.filter { keep(it.product, it.date) }
         return buildJsonObject {
-            put("staged", accepted.size)
-            if (skipped.isNotEmpty()) putJsonArray("skipped") { skipped.forEach { add(it) } }
+            putJsonObject("totals") {
+                put("products", staged.products.size); put("snapshots", staged.snapshots.size)
+                put("transactions", staged.transactions.size); put("links", staged.links.size)
+            }
+            if (pointer != null || from != null || to != null) put("shown", "${snapshots.size} balances and ${transactions.size} transactions match the filter")
+            putJsonArray("products") { staged.products.forEach { add(productArgs(it)) } }
+            putJsonArray("snapshots") { snapshots.forEach { add(snapshotArgs(it)) } }
+            putJsonArray("transactions") { transactions.forEach { add(transactionArgs(it)) } }
+            putJsonArray("links") { staged.links.forEach { add(linkArgs(it)) } }
             checks()?.let { put("checks", it) }
         }
     }
 
+    private suspend fun updateStaged(args: JsonObject): JsonObject {
+        val items = args["items"]?.jsonArray ?: throw ToolError("items is required")
+        if (items.isEmpty()) throw ToolError("items is empty")
+        val before = staged
+        try {
+            val categories = db.setupDao().spendingCategories().associateBy { it.id }
+            items.forEachIndexed { i, element ->
+                val item = element.jsonObject
+                val id = item.long("staged_id")?.toInt() ?: throw ToolError("items[$i].staged_id is required")
+                val set = item["set"] as? JsonObject ?: throw ToolError("items[$i].set must be an object with the fields to change")
+                updateOne(id, JsonObject(set - "staged_id"), "staged item $id", categories)
+            }
+        } catch (e: Exception) {
+            // All or nothing, so a half-applied batch never leaves the model guessing what changed.
+            staged = before
+            throw e
+        }
+        return buildJsonObject {
+            put("updated", items.size)
+            checks()?.let { put("checks", it) }
+        }
+    }
+
+    private suspend fun updateOne(id: Int, set: JsonObject, at: String, categories: Map<Long, SpendingCategoryEntity>) {
+        staged.transactions.firstOrNull { it.id == id }?.let { old ->
+            val base = transactionArgs(old)
+            val kindChanged = set["kind"]?.let { (it as? JsonPrimitive)?.contentOrNull?.trim()?.equals(old.kind, ignoreCase = true) != true } == true
+            val merged = overlay(if (kindChanged && "spending_category_id" !in set) JsonObject(base - "spending_category_id") else base, set)
+            val updated = parseTransaction(merged, at, categories).copy(id = id)
+            val moved = updated.product != old.product || updated.date != old.date || BigDecimal(updated.amount).compareTo(BigDecimal(old.amount)) != 0
+            if (moved) transactionClash(updated, set)?.let { throw ToolError("$at: $it") }
+            staged = staged.copy(transactions = staged.transactions.map { if (it.id == id) updated else it })
+            return
+        }
+        staged.snapshots.firstOrNull { it.id == id }?.let { old ->
+            val updated = parseSnapshot(overlay(snapshotArgs(old), set), at).copy(id = id)
+            if (updated.product != old.product || updated.date != old.date) {
+                snapshotClash(updated, staged.snapshots.filter { it.id != id })?.let { throw ToolError("$at (${updated.date}): $it") }
+            }
+            staged = staged.copy(snapshots = staged.snapshots.map { if (it.id == id) updated else it })
+            return
+        }
+        staged.products.firstOrNull { it.id == id }?.let { old ->
+            set.string("ref")?.let { if (it != old.ref) throw ToolError("$at: a staged product's ref can't change; remove it and stage it again") }
+            val updated = parseProduct(overlay(productArgs(old), set), old.ref, "$at: ").copy(id = id)
+            staged = staged.copy(products = staged.products.map { if (it.id == id) updated else it })
+            return
+        }
+        staged.links.firstOrNull { it.id == id }?.let {
+            val ids = set["transaction_ids"]?.jsonArray?.mapNotNull { e -> (e as? JsonPrimitive)?.longOrNull }
+                ?: throw ToolError("$at: a link only has transaction_ids to change")
+            requireLinkable(ids, "$at: ")
+            staged = staged.copy(links = staged.links.map { l -> if (l.id == id) TransferLink(ids, id) else l })
+            return
+        }
+        throw ToolError("$at: nothing staged has that id. Call get_staged_changes for the current ids.")
+    }
+
+    private suspend fun removeStaged(args: JsonObject): JsonObject {
+        val ids = args["staged_ids"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.longOrNull?.toInt() }.orEmpty().toSet()
+        if (ids.isEmpty()) throw ToolError("staged_ids is required")
+        val known = staged.products.map { it.id } + staged.snapshots.map { it.id } + staged.transactions.map { it.id } + staged.links.map { it.id }
+        val unknown = ids - known.toSet()
+        if (unknown.isNotEmpty()) throw ToolError("Nothing staged has id ${unknown.joinToString()}. Call get_staged_changes for the current ids.")
+        // Rows staged on a removed product would point at nothing.
+        val refs = staged.products.filter { it.id in ids }.map { it.ref }.toSet()
+        fun orphaned(p: ProductPointer) = p.ref != null && p.ref in refs
+        val cascaded = staged.snapshots.filter { it.id !in ids && orphaned(it.product) }.map { it.id } +
+            staged.transactions.filter { it.id !in ids && orphaned(it.product) }.map { it.id }
+        val gone = ids + cascaded
+        staged = staged.copy(
+            products = staged.products.filter { it.id !in gone },
+            snapshots = staged.snapshots.filter { it.id !in gone },
+            transactions = staged.transactions.filter { it.id !in gone },
+            links = staged.links.filter { it.id !in gone },
+        )
+        return buildJsonObject {
+            put("removed", ids.size)
+            if (cascaded.isNotEmpty()) putJsonArray("also_removed_with_their_product") { cascaded.forEach { add(it) } }
+            putJsonObject("remaining") {
+                put("products", staged.products.size); put("snapshots", staged.snapshots.size)
+                put("transactions", staged.transactions.size); put("links", staged.links.size)
+            }
+            checks()?.let { put("checks", it) }
+        }
+    }
+
+    /** [base] with [set] on top. A product is named by id or by ref, so setting one drops the other. */
+    private fun overlay(base: JsonObject, set: JsonObject): JsonObject {
+        val merged = base.toMutableMap()
+        if ("product_id" in set) merged.remove("new_product_ref")
+        if ("new_product_ref" in set) merged.remove("product_id")
+        merged.putAll(set)
+        return JsonObject(merged)
+    }
+
+    // Staged items in the same shape as the stage tools' arguments, so the model can read and correct them alike.
+
+    private fun JsonObjectBuilder.putPointer(p: ProductPointer) {
+        p.id?.let { put("product_id", it) }
+        p.ref?.let { put("new_product_ref", it) }
+    }
+
+    private fun productArgs(p: NewProduct) = buildJsonObject {
+        put("staged_id", p.id); put("ref", p.ref); put("source_id", p.sourceId); put("asset_class_id", p.assetClassId)
+        put("name", p.name); put("currency", p.currency)
+        if (p.identifier.isNotBlank()) put("identifier", p.identifier)
+    }
+
+    private fun snapshotArgs(s: NewSnapshot) = buildJsonObject {
+        put("staged_id", s.id); putPointer(s.product); put("date", s.date); put("value", s.value)
+        s.quantity?.let { put("quantity", it) }
+        s.unitPrice?.let { put("unit_price", it) }
+        if (s.note.isNotBlank()) put("note", s.note)
+    }
+
+    private fun transactionArgs(t: NewTransaction) = buildJsonObject {
+        put("staged_id", t.id); putPointer(t.product); put("date", t.date); put("amount", t.amount)
+        put("description", t.description)
+        if (t.counterparty.isNotBlank()) put("counterparty", t.counterparty)
+        put("kind", t.kind.lowercase())
+        t.spendingCategoryId?.let { put("spending_category_id", it) }
+        t.transferKey?.let { put("transfer_key", it) }
+        t.linkToTransactionId?.let { put("link_to_transaction_id", it) }
+        t.quantity?.let { put("quantity", it) }
+        t.fxRate?.let { put("fx_rate", it) }
+    }
+
+    private fun linkArgs(l: TransferLink) = buildJsonObject {
+        put("staged_id", l.id)
+        putJsonArray("transaction_ids") { l.transactionIds.forEach { add(it) } }
+    }
+
     private suspend fun sumTransactions(args: JsonObject): JsonObject {
-        val pointer = pointer(args, 0)
+        val pointer = pointer(args, "arguments")
         val from = args.date("from") ?: LocalDate.of(1900, 1, 1)
         val to = args.date("to") ?: LocalDate.of(2999, 1, 1)
         val stored = pointer.id?.let { id -> db.ledgerDao().transactions(id, from, to, null, Int.MAX_VALUE) }.orEmpty()
@@ -565,16 +812,16 @@ class ToolExecutor(
         }
     }
 
-    private suspend fun pointer(item: JsonObject, index: Int): ProductPointer {
+    private suspend fun pointer(item: JsonObject, at: String): ProductPointer {
         val id = item.long("product_id")
         val ref = item.string("new_product_ref")
         return when {
             id != null -> { requireProduct(id); ProductPointer(id = id) }
             ref != null -> {
-                if (staged.products.none { it.ref == ref }) throw ToolError("items[$index]: no staged product with ref '$ref'")
+                if (staged.products.none { it.ref == ref }) throw ToolError("$at: no staged product with ref '$ref'")
                 ProductPointer(ref = ref)
             }
-            else -> throw ToolError("items[$index]: give product_id or new_product_ref")
+            else -> throw ToolError("$at: give product_id or new_product_ref")
         }
     }
 

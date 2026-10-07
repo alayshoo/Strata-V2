@@ -3,9 +3,10 @@ package com.strata.app.ai
 import kotlinx.serialization.Serializable
 
 /**
- * Writes the assistant has staged during one turn. Nothing touches the ledger until the user
- * taps Apply on the review card; then [com.strata.app.data.repo.LedgerRepository.apply]
- * writes everything in one database transaction tagged with a single import id.
+ * Writes the assistant has staged. Nothing touches the ledger until the user taps Apply on the
+ * review card; then [com.strata.app.data.repo.LedgerRepository.apply] writes everything in one
+ * database transaction tagged with a single import id. A card still pending when the user writes
+ * again carries into the next turn, so the assistant can correct single items by their staged id.
  */
 @Serializable
 data class ChangeSet(
@@ -14,8 +15,21 @@ data class ChangeSet(
     val transactions: List<NewTransaction> = emptyList(),
     val links: List<TransferLink> = emptyList(),
     val fileNames: List<String> = emptyList(),
+    /** Next staged id to hand out; ids are unique across every kind of item. */
+    val nextId: Int = 1,
 ) {
     val isEmpty: Boolean get() = products.isEmpty() && snapshots.isEmpty() && transactions.isEmpty() && links.isEmpty()
+
+    /** Gives an id to items staged before items had one. */
+    fun withIds(): ChangeSet {
+        val used = products.map { it.id } + snapshots.map { it.id } + transactions.map { it.id } + links.map { it.id }
+        var next = maxOf(nextId, (used.maxOrNull() ?: 0) + 1)
+        val products = products.map { if (it.id == 0) it.copy(id = next++) else it }
+        val snapshots = snapshots.map { if (it.id == 0) it.copy(id = next++) else it }
+        val transactions = transactions.map { if (it.id == 0) it.copy(id = next++) else it }
+        val links = links.map { if (it.id == 0) it.copy(id = next++) else it }
+        return copy(products = products, snapshots = snapshots, transactions = transactions, links = links, nextId = next)
+    }
 
     fun headline(): String = buildList {
         if (snapshots.isNotEmpty()) add(plural(snapshots.size, "balance", "balances"))
@@ -35,6 +49,7 @@ data class NewProduct(
     val name: String,
     val currency: String,
     val identifier: String = "",
+    val id: Int = 0,
 )
 
 /** Points at an existing product by id, or at a staged one by its ref. */
@@ -49,6 +64,7 @@ data class NewSnapshot(
     val quantity: String? = null,
     val unitPrice: String? = null,
     val note: String = "",
+    val id: Int = 0,
 )
 
 @Serializable
@@ -66,7 +82,8 @@ data class NewTransaction(
     val linkToTransactionId: Long? = null,
     val quantity: String? = null,
     val fxRate: String? = null,
+    val id: Int = 0,
 )
 
 @Serializable
-data class TransferLink(val transactionIds: List<Long>)
+data class TransferLink(val transactionIds: List<Long>, val id: Int = 0)

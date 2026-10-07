@@ -2,6 +2,7 @@
 
 package com.strata.app.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -40,7 +41,8 @@ enum class TxKind(val label: String) {
 
 enum class Role { USER, ASSISTANT, TOOL }
 
-enum class ProposalStatus { PENDING, APPLIED, DISCARDED, UNDONE }
+/** SUPERSEDED: a pending card carried into a later turn and replaced by that turn's card. */
+enum class ProposalStatus { PENDING, APPLIED, DISCARDED, UNDONE, SUPERSEDED }
 
 @Entity(tableName = "sources", indices = [Index(value = ["name"], unique = true)])
 @Serializable
@@ -167,6 +169,8 @@ data class ChatEntity(
     val title: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** What the model requests in this chat have cost so far, in US dollars as OpenRouter reports it. */
+    @ColumnInfo(defaultValue = "0") val costUsd: Double = 0.0,
 )
 
 @Entity(

@@ -56,6 +56,8 @@ sealed interface ChatItem {
         val totalMs: Long get() = rounds.sumOf { it.durationMs ?: 0L }
         val callCount: Int get() = rounds.sumOf { it.calls.size }
         val errorCount: Int get() = rounds.sumOf { r -> r.calls.count { it.isError } }
+        /** Null when no round reported a cost. */
+        val totalCost: Double? get() = rounds.mapNotNull { it.cost }.takeIf { it.isNotEmpty() }?.sum()
     }
 
     data class Assistant(val id: Long, val text: String, val proposal: ProposalUi?) : ChatItem {
@@ -74,6 +76,8 @@ data class TraceRound(
     /** Text the model wrote alongside its tool calls. */
     val note: String?,
     val calls: List<TraceCall>,
+    /** US dollars, when OpenRouter reported it. */
+    val cost: Double? = null,
 )
 
 data class Lookup(
@@ -103,6 +107,8 @@ private val stepNames = mapOf(
     "sum_transactions" to "Added up transactions",
     "calculate" to "Calculated",
     "get_staged_changes" to "Reviewed the draft",
+    "update_staged" to "Corrected the draft",
+    "remove_staged" to "Removed from the draft",
     "clear_staged_changes" to "Started the draft over",
 )
 
@@ -156,9 +162,9 @@ fun buildChatItems(messages: List<MessageEntity>, attachments: List<AttachmentEn
                             TraceCall(label, name, pretty(args), result?.let(::pretty), result?.trimStart()?.startsWith("{\"error\"") == true)
                         }
                     }.getOrDefault(emptyList())
-                    rounds += TraceRound(t?.round, t?.durationMs, t?.promptTokens, t?.completionTokens, t?.reasoning, m.content.ifBlank { null }, calls)
+                    rounds += TraceRound(t?.round, t?.durationMs, t?.promptTokens, t?.completionTokens, t?.reasoning, m.content.ifBlank { null }, calls, t?.cost)
                 } else {
-                    if (t != null) rounds += TraceRound(t.round, t.durationMs, t.promptTokens, t.completionTokens, t.reasoning, null, emptyList())
+                    if (t != null) rounds += TraceRound(t.round, t.durationMs, t.promptTokens, t.completionTokens, t.reasoning, null, emptyList(), t.cost)
                     flush()
                     items += ChatItem.Assistant(m.id, m.content, m.proposalJson?.let { proposalUi(m, it, lookup) })
                 }

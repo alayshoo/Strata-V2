@@ -51,6 +51,7 @@ import com.strata.app.ui.dashboard.DashboardViewModel
 import com.strata.app.ui.explorer.ExplorerScreen
 import com.strata.app.ui.explorer.ExplorerViewModel
 import com.strata.app.ui.explorer.ProductDetailScreen
+import com.strata.app.ui.explorer.SourceDetailScreen
 import com.strata.app.ui.setup.SetupScreen
 import com.strata.app.ui.setup.SetupViewModel
 import kotlinx.coroutines.launch
@@ -143,11 +144,24 @@ fun AppRoot(session: Session, shareInbox: ShareInbox) {
                 ExplorerScreen(
                     data,
                     onOpenProduct = { nav.navigate("product/$it") },
+                    onOpenSource = { nav.navigate("source/$it") },
                     onUndoImport = vm::undoImport,
                     onSaveProduct = { vm.saveProduct(it) },
                     onSaveTransaction = { vm.saveTransaction(it) },
                     onDeleteTransaction = { vm.deleteTransaction(it) },
                     contentPadding = padding,
+                )
+            }
+            composable("source/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { entry ->
+                val vm = viewModel { ExplorerViewModel(session) }
+                val data by vm.data.collectAsStateWithLifecycle()
+                SourceDetailScreen(
+                    entry.arguments!!.getLong("id"), data,
+                    onBack = { nav.popBackStack() },
+                    onOpenProduct = { nav.navigate("product/$it") },
+                    onSaveProduct = { vm.saveProduct(it) },
+                    onSaveTransaction = { vm.saveTransaction(it) },
+                    onDeleteTransaction = { vm.deleteTransaction(it) },
                 )
             }
             composable("product/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { entry ->

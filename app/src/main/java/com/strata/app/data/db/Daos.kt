@@ -220,6 +220,9 @@ interface ChatDao {
     @Query("UPDATE messages SET proposalStatus = 'UNDONE' WHERE importId = :importId")
     suspend fun markImportUndone(importId: Long)
 
+    @Query("UPDATE chats SET costUsd = costUsd + :usd WHERE id = :chatId")
+    suspend fun addCost(chatId: Long, usd: Double)
+
     @Query("SELECT MAX(id) FROM messages WHERE chatId = :chatId")
     suspend fun lastMessageId(chatId: Long): Long?
 }
