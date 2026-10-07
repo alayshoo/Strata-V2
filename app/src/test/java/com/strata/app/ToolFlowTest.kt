@@ -7,6 +7,7 @@ import com.strata.app.ai.ToolExecutor
 import com.strata.app.data.db.AssetClassEntity
 import com.strata.app.data.db.FlowKind
 import com.strata.app.data.db.ProductEntity
+import com.strata.app.data.db.SnapshotEntity
 import com.strata.app.data.db.SourceEntity
 import com.strata.app.data.db.SourceType
 import com.strata.app.data.db.SpendingCategoryEntity
@@ -97,6 +98,31 @@ class ToolFlowTest {
         val comma = tools.execute("stage_snapshots", """{"items":[{"product_id":1,"date":"2026-09-30","value":"1.234,56"}]}""")
         assertTrue(comma.contains("decimal separator"))
         assertTrue(tools.staged.isEmpty)
+    }
+
+    @Test fun rejectsTradesWhoseUnitsAndAmountDisagreeAndUnitsOnCash() = runBlocking {
+        db.setupDao().insertAssetClass(AssetClassEntity(2, "ETFs", "jade"))
+        db.ledgerDao().insertProduct(ProductEntity(3, 2, 2, "VUAA", "EUR"))
+        db.ledgerDao().insertSnapshot(SnapshotEntity(productId = 2, date = LocalDate.of(2025, 11, 30), value = BigDecimal("500")))
+        val flipped = tools.execute(
+            "stage_transactions",
+            """{"items":[{"product_id":3,"date":"2025-11-07","amount":"312.97","quantity":"-2.8454345","description":"Sell VUAA","kind":"trade"}]}""",
+        )
+        assertTrue(flipped, flipped.contains("opposite signs"))
+        val onCash = tools.execute(
+            "stage_transactions",
+            """{"items":[{"product_id":2,"date":"2025-12-15","amount":"0","quantity":"-0.13848401","description":"Split, delivery out","kind":"trade"}]}""",
+        )
+        assertTrue(onCash, onCash.contains("holds cash"))
+        assertTrue(tools.staged.isEmpty)
+        val sale = tools.execute(
+            "stage_transactions",
+            """{"items":[
+                {"product_id":3,"date":"2025-11-07","amount":"-312.97","quantity":"-2.8454345","description":"Sell VUAA","kind":"trade","transfer_key":"s"},
+                {"product_id":2,"date":"2025-11-07","amount":"312.97","description":"Sell VUAA","kind":"trade","transfer_key":"s"}
+            ]}""",
+        )
+        assertTrue(sale, sale.contains("\"staged\":2"))
     }
 
     @Test fun sumsAndChecksStagedBalances() = runBlocking {
