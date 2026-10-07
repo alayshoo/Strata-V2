@@ -18,8 +18,10 @@ android {
         applicationId = "com.strata.app"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes its run number so each build counts up; local builds stay at 1.
+        val buildNumber = System.getenv("STRATA_BUILD_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = buildNumber
+        versionName = "0.1.$buildNumber"
     }
 
     // Release builds are signed with your own key when these are set (see README), so every

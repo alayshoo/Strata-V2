@@ -64,11 +64,15 @@ CI builds the release APK on every push and attaches it to the run as `strata-ap
 
 ### Signing, so updates install over each other
 
-Without a key, release builds are signed with the debug key, which differs between CI runners. Android then refuses to update in place, and uninstalling deletes the data. Create a key once and add it to the repository secrets:
+Android only installs an update over an existing app when both are signed with the same key, and uninstalling deletes the app's data. CI signs with the key stored in the repository secrets:
 
-```bash
-keytool -genkeypair -v -keystore strata.jks -alias strata -keyalg RSA -keysize 4096 -validity 36500
-base64 -w0 strata.jks   # -> secret STRATA_KEYSTORE_B64
-```
+| Secret | Value |
+|---|---|
+| `STRATA_KEYSTORE_B64` | the keystore file, base64-encoded (`base64 -w0 strata.jks`) |
+| `STRATA_KEYSTORE_PASSWORD` | the keystore password |
+| `STRATA_KEY_ALIAS` | the key alias |
+| `STRATA_KEY_PASSWORD` | the key password |
 
-Add the secrets `STRATA_KEYSTORE_B64`, `STRATA_KEYSTORE_PASSWORD` and, if they differ from the defaults, `STRATA_KEY_ALIAS` and `STRATA_KEY_PASSWORD`. Locally, export `STRATA_KEYSTORE=/path/to/strata.jks` and the same passwords.
+With the secrets set, every push to `main` publishes a GitHub release (`build-<n>`) with the signed APK, and the version code counts up with the run number. Without them, builds fall back to the runner's throwaway debug key and nothing is published. Locally, export `STRATA_KEYSTORE=/path/to/strata.jks` and the same values to build a signed release.
+
+Never commit the keystore. Keep a copy somewhere safe: losing it means future builds cannot update the installed app.
