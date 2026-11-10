@@ -221,4 +221,45 @@ class ValuationTest {
         val flows = monthlyFlows(items, d("2026-08-01"), d("2026-09-30"), FxTable.EMPTY)
         months.zip(flows).forEach { (m, f) -> assertEquals(0, f.spending.compareTo(m.second.values.fold(BigDecimal.ZERO, BigDecimal::add))) }
     }
+
+    private fun total(v: Valuator, date: String) = v.byAssetClass(d(date)).values.fold(BigDecimal.ZERO, BigDecimal::add)
+
+    @Test fun transferBookedOnDifferentDaysCountsOnce() {
+        // 800 leaves the bank on the 10th, but the broker books it arriving on the 9th.
+        val products = listOf(ValuedProduct(1, 1, "EUR", 1), ValuedProduct(2, 1, "EUR", 2))
+        val balances = listOf(ValuePoint(1, d("2026-07-01"), bd("1000")), ValuePoint(2, d("2026-07-01"), bd("0")))
+        val flows = listOf(
+            ValueFlow(2, d("2026-07-09"), bd("800"), transferGroup = "t"),
+            ValueFlow(1, d("2026-07-10"), bd("-800"), transferGroup = "t"),
+        )
+        val v = Valuator(products, balances, FxTable.EMPTY, flows)
+        listOf("2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11").forEach {
+            assertEquals(it, 0, bd("1000").compareTo(total(v, it)))
+        }
+        // Each account still shows what its statement says.
+        assertEquals(0, bd("800").compareTo(v.valueAt(2, d("2026-07-09"))))
+        assertEquals(0, bd("1000").compareTo(v.valueAt(1, d("2026-07-09"))))
+
+        // And the other way round: money that left before it landed doesn't vanish meanwhile.
+        val early = Valuator(products, balances, FxTable.EMPTY, listOf(
+            ValueFlow(1, d("2026-07-09"), bd("-800"), transferGroup = "t"),
+            ValueFlow(2, d("2026-07-11"), bd("800"), transferGroup = "t"),
+        ))
+        listOf("2026-07-09", "2026-07-10", "2026-07-11").forEach {
+            assertEquals(it, 0, bd("1000").compareTo(total(early, it)))
+        }
+    }
+
+    @Test fun unrelatedLegsWithOneLinkAreLeftAsRecorded() {
+        val products = listOf(ValuedProduct(1, 1, "EUR"), ValuedProduct(2, 1, "EUR"))
+        // Legs that don't offset, or that are months apart, aren't one transfer in transit.
+        val v = Valuator(products, emptyList(), FxTable.EMPTY, listOf(
+            ValueFlow(1, d("2026-01-05"), bd("500"), transferGroup = "a"),
+            ValueFlow(2, d("2026-01-06"), bd("-40"), transferGroup = "a"),
+            ValueFlow(1, d("2026-02-01"), bd("300"), transferGroup = "b"),
+            ValueFlow(2, d("2026-06-01"), bd("-300"), transferGroup = "b"),
+        ))
+        assertEquals(0, bd("500").compareTo(total(v, "2026-01-05")))
+        assertEquals(0, bd("760").compareTo(total(v, "2026-03-01")))
+    }
 }

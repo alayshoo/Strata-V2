@@ -6,7 +6,7 @@ import com.strata.app.data.db.StrataDatabase
 import com.strata.app.data.db.TxKind
 import com.strata.app.domain.FlowItem
 import com.strata.app.domain.FxTable
-import com.strata.app.domain.ValueFlow
+import com.strata.app.domain.toValueFlow
 import com.strata.app.domain.ValuePoint
 import com.strata.app.domain.ValuedProduct
 import com.strata.app.domain.Valuator
@@ -486,7 +486,7 @@ class ToolExecutor(
             products.map { ValuedProduct(it.id, it.assetClassId, it.currency, it.sourceId) },
             snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
             fxTable(),
-            db.backupDao().transactions().map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
+            db.backupDao().transactions().map { it.toValueFlow() },
         )
         val byClass = valuator.byAssetClass(date)
         val liabilities = classes.filter { it.isLiability }.map { it.id }.toSet()
