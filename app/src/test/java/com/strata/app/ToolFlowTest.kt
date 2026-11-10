@@ -201,7 +201,7 @@ class ToolFlowTest {
         val sameWay = dao.insertTransaction(
             TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 24), amount = BigDecimal("-50"), description = "Withdrawal", kind = TxKind.TRANSFER)
         )
-        fun stage(id: Long) = tools.execute(
+        suspend fun stage(id: Long) = tools.execute(
             "stage_transactions",
             """{"items":[{"product_id":1,"date":"2026-09-25","amount":"-50","description":"To broker","kind":"transfer","link_to_transaction_id":$id}]}""",
         )
