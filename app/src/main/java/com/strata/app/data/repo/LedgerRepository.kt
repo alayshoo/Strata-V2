@@ -113,16 +113,22 @@ class LedgerRepository(private val db: StrataDatabase) {
             )
         }
 
+        // Settle every transfer_key's group before inserting, so all the legs sharing a key and the
+        // recorded leg any of them links to end up in one group, whichever order they were staged in.
         val groups = HashMap<String, String>()
+        for (t in changes.transactions) {
+            val key = t.transferKey ?: continue
+            val linked = t.linkToTransactionId?.let { dao.transaction(it) }?.transferGroup ?: continue
+            groups.putIfAbsent(key, linked)
+        }
         for (t in changes.transactions) {
             val kind = TxKind.valueOf(t.kind)
             var group = t.transferKey?.let { key -> groups.getOrPut(key) { UUID.randomUUID().toString() } }
             if (t.linkToTransactionId != null) {
                 val other = dao.transaction(t.linkToTransactionId)
                 if (other != null) {
-                    group = other.transferGroup ?: group ?: UUID.randomUUID().toString()
-                    if (other.transferGroup == null) dao.setTransferGroup(listOf(other.id), group)
-                    t.transferKey?.let { groups[it] = group }
+                    group = group ?: other.transferGroup ?: UUID.randomUUID().toString()
+                    if (other.transferGroup != group) dao.setTransferGroup(listOf(other.id), group)
                 }
             }
             dao.insertTransaction(

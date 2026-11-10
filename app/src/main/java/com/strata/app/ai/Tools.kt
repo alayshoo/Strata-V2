@@ -33,6 +33,8 @@ import kotlinx.serialization.json.putJsonObject
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
+import java.time.temporal.ChronoUnit
+import kotlin.math.abs
 
 /** JSON-schema tool definitions sent to the model. */
 object ToolSpecs {
@@ -187,7 +189,7 @@ object ToolSpecs {
                             "kind" to prop("string", "One of: $kinds."),
                             "spending_category_id" to prop("integer", "Only for expense and income."),
                             "transfer_key" to prop("string", "Same key on both legs staged now to link them."),
-                            "link_to_transaction_id" to prop("integer", "Existing transaction id that is the other leg."),
+                            "link_to_transaction_id" to prop("integer", "Id of the recorded, unlinked other leg (from find_transfer_candidates). Not a staged_id: for a leg staged now use transfer_key."),
                             "quantity" to prop("string", "Units bought (+) or sold (−) on a trade's security leg; its amount has the same sign."),
                             "fx_rate" to prop("string", "Rate the institution applied, units of this currency per 1 EUR."),
                             "allow_duplicate" to prop("boolean", "Stage even if an identical transaction exists."),
@@ -640,7 +642,7 @@ class ToolExecutor(
             if (category.kind != expected) throw ToolError("$at: '${category.name}' is an ${category.kind.name.lowercase()} category but kind is ${kind.name.lowercase()}")
         }
         val linkId = item.long("link_to_transaction_id")
-        if (linkId != null && db.ledgerDao().transaction(linkId) == null) throw ToolError("$at: transaction $linkId does not exist")
+        if (linkId != null) requireOtherLeg(linkId, kind, amount, date, at)
         val quantity = item.decimal("quantity")?.takeIf { it.signum() != 0 }
         if (quantity != null) {
             if (amount.signum() != 0 && amount.signum() != quantity.signum()) throw ToolError(
@@ -677,7 +679,30 @@ class ToolExecutor(
 
     private suspend fun requireLinkable(ids: List<Long>, at: String) {
         if (ids.size < 2) throw ToolError("${at}Provide at least two transaction ids")
-        ids.forEach { if (db.ledgerDao().transaction(it) == null) throw ToolError("${at}Transaction $it does not exist") }
+        val legs = ids.map { db.ledgerDao().transaction(it) ?: throw ToolError("${at}Transaction $it does not exist") }
+        legs.forEach { if (it.kind !in LINKABLE) throw ToolError("${at}Transaction ${it.id} is ${it.kind.name.lowercase()}, not a transfer or trade leg") }
+        val days = ChronoUnit.DAYS.between(legs.minOf { it.date }, legs.maxOf { it.date })
+        if (days > MAX_LEG_GAP_DAYS) throw ToolError("${at}These legs are $days days apart; the legs of one transfer or trade land within $MAX_LEG_GAP_DAYS days")
+        val signs = legs.map { it.amount.signum() }.filter { it != 0 }.toSet()
+        if (signs.size == 1) throw ToolError("${at}Every leg moves money the same way; a transfer or trade has a leg out (negative) and a leg in (positive)")
+    }
+
+    /**
+     * Checks that recorded transaction [linkId] can be the other leg of the leg being staged. Ids are easy to mix up
+     * (a staged_id is not a transaction id), and a wrong one would silently tie unrelated transactions together.
+     */
+    private suspend fun requireOtherLeg(linkId: Long, kind: TxKind, amount: BigDecimal, date: LocalDate, at: String) {
+        val hint = "link_to_transaction_id takes the id of a recorded transaction from find_transfer_candidates, never a staged_id. " +
+            "To link legs staged now, give them the same transfer_key"
+        val other = db.ledgerDao().transaction(linkId) ?: throw ToolError("$at: transaction $linkId does not exist. $hint")
+        if (kind !in LINKABLE) throw ToolError("$at: only a transfer or trade leg links to another leg")
+        if (other.kind !in LINKABLE) throw ToolError("$at: transaction $linkId is ${other.kind.name.lowercase()} (${other.date}, ${other.amount.toPlainString()}), not a transfer or trade leg. $hint")
+        if (other.transferGroup != null) throw ToolError("$at: transaction $linkId is already linked to its other leg. $hint")
+        val days = abs(ChronoUnit.DAYS.between(other.date, date))
+        if (days > MAX_LEG_GAP_DAYS) throw ToolError("$at: transaction $linkId is on ${other.date}, $days days from this leg. $hint")
+        if (amount.signum() != 0 && other.amount.signum() == amount.signum()) throw ToolError(
+            "$at: transaction $linkId (${other.amount.toPlainString()}) moves money the same way as this leg; the other leg has the opposite sign. $hint"
+        )
     }
 
     // ---------- Correcting balances already recorded ----------
@@ -1050,5 +1075,8 @@ class ToolExecutor(
 
     private companion object {
         val EDITABLE_SNAPSHOT_FIELDS = listOf("date", "value", "quantity", "unit_price", "note")
+        val LINKABLE = setOf(TxKind.TRANSFER, TxKind.TRADE)
+        /** Legs of one transfer or trade (settlement, a pre-paid order) land at most this far apart. */
+        const val MAX_LEG_GAP_DAYS = 60L
     }
 }

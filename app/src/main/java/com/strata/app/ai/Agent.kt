@@ -259,6 +259,7 @@ class Agent(
               with quantity on the security leg), dividend, interest, fee.
             - Link both legs of a transfer or trade. Within one turn give both legs the same transfer_key. When only one side is in this
               statement, call find_transfer_candidates and use link_to_transaction_id if the other side already exists.
+              link_to_transaction_id is only ever an id find_transfer_candidates returned, never a staged_id.
             - A trade is always two legs with the same transfer_key: on the cash product the signed cash amount (a buy is negative),
               and on the security product the opposite amount (a buy is positive, the cost) with the units in quantity
               (negative when selling). Broker fees and taxes are separate fee transactions on the cash product.

@@ -186,4 +186,50 @@ class ToolFlowTest {
         assertEquals(legs[0].transferGroup, legs[1].transferGroup)
         assertNotNull(legs[0].transferGroup)
     }
+
+    @Test fun rejectsLinksToTransactionsThatAreNotTheOtherLeg() = runBlocking {
+        val dao = db.ledgerDao()
+        val fee = dao.insertTransaction(
+            TransactionEntity(productId = 2, date = LocalDate.of(2025, 11, 10), amount = BigDecimal("-1"), description = "Fee on buy", kind = TxKind.FEE)
+        )
+        val old = dao.insertTransaction(
+            TransactionEntity(productId = 2, date = LocalDate.of(2025, 11, 10), amount = BigDecimal("1515"), description = "Incoming", kind = TxKind.TRANSFER)
+        )
+        val linked = dao.insertTransaction(
+            TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 24), amount = BigDecimal("50"), description = "Deposit", kind = TxKind.TRANSFER, transferGroup = "g")
+        )
+        val sameWay = dao.insertTransaction(
+            TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 24), amount = BigDecimal("-50"), description = "Withdrawal", kind = TxKind.TRANSFER)
+        )
+        fun stage(id: Long) = tools.execute(
+            "stage_transactions",
+            """{"items":[{"product_id":1,"date":"2026-09-25","amount":"-50","description":"To broker","kind":"transfer","link_to_transaction_id":$id}]}""",
+        )
+        assertTrue(stage(fee).contains("not a transfer or trade leg"))
+        assertTrue(stage(old).contains("days from this leg"))
+        assertTrue(stage(linked).contains("already linked"))
+        assertTrue(stage(sameWay).contains("opposite sign"))
+        assertTrue(stage(9999).contains("never a staged_id"))
+        assertTrue(tools.staged.isEmpty)
+        assertTrue(tools.execute("link_transfer", """{"transaction_ids":[$fee,$sameWay]}""").contains("not a transfer or trade leg"))
+    }
+
+    @Test fun legsSharingAKeyStayTogetherWhenOneAlsoLinks() = runBlocking {
+        val existing = db.ledgerDao().insertTransaction(
+            TransactionEntity(productId = 2, date = LocalDate.of(2026, 9, 25), amount = BigDecimal("10.99"), description = "Card funding", kind = TxKind.TRANSFER)
+        )
+        // The first leg staged takes the key's group; the second, sharing the key, also links a recorded leg.
+        tools.execute(
+            "stage_transactions",
+            """{"items":[
+                {"product_id":2,"date":"2026-09-25","amount":"10.99","description":"Funding","kind":"transfer","transfer_key":"k","allow_duplicate":true},
+                {"product_id":1,"date":"2026-09-25","amount":"-10.99","description":"Card funding","kind":"transfer","transfer_key":"k","link_to_transaction_id":$existing,"allow_duplicate":true}
+            ]}""",
+        )
+        ledger.apply(tools.staged, chatId = null)
+        val groups = db.backupDao().transactions().map { it.transferGroup }
+        assertEquals(3, groups.size)
+        assertNotNull(groups[0])
+        assertEquals(1, groups.toSet().size)
+    }
 }
