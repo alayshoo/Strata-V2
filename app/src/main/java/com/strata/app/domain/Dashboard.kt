@@ -65,13 +65,17 @@ data class DashboardState(
     val loading: Boolean = true,
 )
 
+/** A transaction as the valuator sees it; only transfers carry their link, so their legs line up. */
+fun TransactionEntity.toValueFlow() =
+    ValueFlow(productId, date, amount, quantity, transferGroup.takeIf { kind == TxKind.TRANSFER })
+
 fun buildDashboard(input: DashboardInput, range: TimeRange, today: LocalDate = LocalDate.now()): DashboardState {
     val liabilityIds = input.assetClasses.filter { it.isLiability }.map { it.id }.toSet()
     val valuator = Valuator(
         input.products.map { ValuedProduct(it.id, it.assetClassId, it.currency, it.sourceId) },
         input.snapshots.map { ValuePoint(it.productId, it.date, it.value, it.quantity) },
         input.fx,
-        input.transactions.map { ValueFlow(it.productId, it.date, it.amount, it.quantity) },
+        input.transactions.map { it.toValueFlow() },
     )
     val earliest = valuator.earliest
     val start = range.start(today, earliest)

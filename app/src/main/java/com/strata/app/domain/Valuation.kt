@@ -83,7 +83,14 @@ data class ValuePoint(
     val value: BigDecimal,
     val quantity: BigDecimal? = null,
 )
-data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDecimal, val quantity: BigDecimal? = null)
+/** [transferGroup] links the legs of one transfer between the user's own accounts; set it only for transfers. */
+data class ValueFlow(
+    val productId: Long,
+    val date: LocalDate,
+    val amount: BigDecimal,
+    val quantity: BigDecimal? = null,
+    val transferGroup: String? = null,
+)
 
 /**
  * Values products at any date. Recorded balances are anchors and are exact on their own dates;
@@ -102,6 +109,11 @@ data class ValueFlow(val productId: Long, val date: LocalDate, val amount: BigDe
  * what was sold: with no balance in units to anchor it, it opens with the least that keeps its
  * units at or above zero. A holding that opens with units was bought before its first transaction
  * on record, so it is shown from the first transaction at its institution, not just its own.
+ *
+ * A transfer between the user's own accounts whose legs are booked on different days (one bank books
+ * it the day it leaves, the other a day or two later) would show the money in both accounts, or in
+ * neither, until the last leg lands. Totals ([byAssetClass]) treat it as still in the account it came
+ * from until then; each product's own value stays what its statement says.
  */
 class Valuator(
     products: List<ValuedProduct>,
@@ -162,6 +174,26 @@ class Valuator(
             val lowest = ledger.lowestUnits()
             if (lowest.signum() < 0) put(id, lowest.negate())
         }
+    }
+
+    /** One leg of a transfer whose legs land on different days, booked on [from] while others land on [until]. */
+    private class TransitLeg(val productId: Long, val from: LocalDate, val until: LocalDate, val amount: BigDecimal)
+
+    private val inTransit: List<TransitLeg> = flows
+        .filter { it.transferGroup != null && it.productId in this.products && it.productId !in unitBased }
+        .groupBy { it.transferGroup }.values
+        .flatMap { legs -> transitLegs(legs) }
+
+    private fun transitLegs(legs: List<ValueFlow>): List<TransitLeg> {
+        val begin = legs.minOf { it.date }
+        val end = legs.maxOf { it.date }
+        if (begin == end || ChronoUnit.DAYS.between(begin, end) > MAX_TRANSIT_DAYS) return emptyList()
+        if (legs.none { it.amount.signum() > 0 } || legs.none { it.amount.signum() < 0 }) return emptyList()
+        // Only legs that offset each other are one transfer; a wrong link or a bad leg leaves it alone.
+        val eur = legs.map { leg -> this.products[leg.productId]?.let { fx.toEur(leg.amount, it.currency, end) } ?: return emptyList() }
+        val gross = eur.maxOf { it.abs() }
+        if (eur.fold(BigDecimal.ZERO, BigDecimal::add).abs() > gross.multiply(TRANSIT_TOLERANCE)) return emptyList()
+        return legs.filter { it.date < end && it.amount.signum() != 0 }.map { TransitLeg(it.productId, it.date, end, it.amount) }
     }
 
     private val firstSeen: Map<Long, LocalDate> = buildMap {
@@ -269,7 +301,21 @@ class Valuator(
             if (eur == null) { missingCurrencies += product.currency; continue }
             out.merge(product.assetClassId, eur, BigDecimal::add)
         }
+        // Money between two of the user's accounts counts once, in the account it left, until it lands.
+        for (leg in inTransit) {
+            if (date < leg.from || date >= leg.until) continue
+            val product = products[leg.productId] ?: continue
+            val eur = fx.toEur(leg.amount, product.currency, date) ?: continue
+            out.merge(product.assetClassId, eur.negate(), BigDecimal::add)
+        }
         return out
+    }
+
+    private companion object {
+        /** Longest gap between the legs of one transfer; longer ones are left as recorded. */
+        const val MAX_TRANSIT_DAYS = 10L
+        /** Legs in different currencies offset only up to the spread. */
+        val TRANSIT_TOLERANCE = BigDecimal("0.05")
     }
 
     fun productValueEur(productId: Long, date: LocalDate): BigDecimal? {
